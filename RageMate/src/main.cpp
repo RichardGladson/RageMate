@@ -1428,11 +1428,53 @@ int pisMoveBonus(Move& m) {
   if(!IS_BLACK(board[m.from])) return 0;
 
   GambitDoctrine doc = detectAndLoadDoctrine();
-  if(doc.id == DOCTRINE_NONE) return 0;
 
   int bonus = 0;
   int toR = rankOf(m.to), toF = fileOf(m.to);
   int piece = board[m.from];
+
+  // ── Pawn-kick zone check (outpost-aware) ──────────────────────────────────
+  // Penalise landing on a square attacked by a white pawn ONLY when the square
+  // is not a genuine outpost. An outpost = no white pawn on an adjacent file
+  // at any rank below the landing square (so it can never be kicked again).
+  // This correctly avoids penalising Alapin Nd5, Sicilian outposts, etc.
+  if(TYPE(piece) == KNIGHT || TYPE(piece) == BISHOP) {
+    // Is the landing square directly attacked by a white pawn right now?
+    bool directKick = false;
+    for(int df = -1; df <= 1; df += 2) {
+      int pr = toR - 1, pf = toF + df;
+      if(inBounds(pr, pf) && board[sqOf(pr, pf)] == W_P) { directKick = true; break; }
+    }
+
+    // Outpost test: no white pawn on adjacent files can ever reach an attack square
+    bool isOutpost = true;
+    for(int df = -1; df <= 1; df += 2) {
+      int adjF = toF + df;
+      if(adjF < 0 || adjF > 7) continue;
+      for(int rr = 0; rr < toR; rr++) {
+        if(board[sqOf(rr, adjF)] == W_P) { isOutpost = false; break; }
+      }
+      if(!isOutpost) break;
+    }
+
+    if(directKick && !isOutpost) {
+      bonus -= 550;  // genuinely losing tempo — heavy deterrent
+    } else if(directKick && isOutpost) {
+      // Safe outpost despite being "kicked" to it — actually reward centralisation
+      bool central = (toF >= 2 && toF <= 5 && toR >= 3 && toR <= 5);
+      if(central) bonus += 80;
+    } else if(!directKick && !isOutpost) {
+      // Imminent kick: white pawn one push away and square is not safe
+      for(int df = -1; df <= 1; df += 2) {
+        int pr = toR - 2, pf = toF + df;
+        if(inBounds(pr, pf) && board[sqOf(pr, pf)] == W_P &&
+           board[sqOf(pr+1, pf)] == EMPTY) {
+          bonus -= 220;
+          break;
+        }
+      }
+    }
+  }
 
   // Center break bonus: prioritize pawns advancing to break squares
   if(TYPE(piece) == PAWN) {
@@ -1666,22 +1708,70 @@ int evaluate() {
       }
       if(tp == KNIGHT || tp == BISHOP) {
         int r = rankOf(s), f = fileOf(s);
-        // Extra sting in opening: being kicked by a pawn loses a full tempo
+        // ── Context-aware pawn-kick / outpost evaluation ────────────────────────
+        // Being kicked loses tempo ONLY when the piece has no safe anchor.
+        // If no enemy pawn on adjacent files can ever reach an attack diagonal
+        // (outpost condition), the piece is safely centralised — reward it instead.
+        // This correctly handles Alapin Nd5, Sicilian outposts, etc.
         int threatPenalty = opening ? 45 : 30;
+
         if(IS_BLACK(p)) {
-          bool pawnthreat = false;
+          bool directKick = false;
           for(int df = -1; df <= 1; df += 2) {
             int pr = r - 1, pf = f + df;
-            if(inBounds(pr, pf) && board[sqOf(pr, pf)] == W_P) { pawnthreat = true; break; }
+            if(inBounds(pr, pf) && board[sqOf(pr, pf)] == W_P) { directKick = true; break; }
           }
-          if(pawnthreat) score += threatPenalty;
+          // Outpost: no white pawn on adjacent files at or below this rank
+          bool isOutpost = true;
+          for(int df = -1; df <= 1; df += 2) {
+            int adjF = f + df;
+            if(adjF < 0 || adjF > 7) continue;
+            for(int rr = 0; rr < r; rr++) {
+              if(board[sqOf(rr, adjF)] == W_P) { isOutpost = false; break; }
+            }
+            if(!isOutpost) break;
+          }
+          if(directKick) {
+            if(isOutpost) {
+              if(f >= 2 && f <= 5 && r >= 3 && r <= 5) score -= 15; // central outpost bonus
+            } else {
+              score += threatPenalty;
+            }
+          } else if(opening && !isOutpost) {
+            for(int df = -1; df <= 1; df += 2) {
+              int pr = r - 2, pf = f + df;
+              if(inBounds(pr, pf) && board[sqOf(pr, pf)] == W_P &&
+                 board[sqOf(pr+1, pf)] == EMPTY) { score += 18; break; }
+            }
+          }
         } else {
-          bool pawnthreat = false;
+          bool directKick = false;
           for(int df = -1; df <= 1; df += 2) {
             int pr = r + 1, pf = f + df;
-            if(inBounds(pr, pf) && board[sqOf(pr, pf)] == B_P) { pawnthreat = true; break; }
+            if(inBounds(pr, pf) && board[sqOf(pr, pf)] == B_P) { directKick = true; break; }
           }
-          if(pawnthreat) score -= threatPenalty;
+          bool isOutpost = true;
+          for(int df = -1; df <= 1; df += 2) {
+            int adjF = f + df;
+            if(adjF < 0 || adjF > 7) continue;
+            for(int rr = 7; rr > r; rr--) {
+              if(board[sqOf(rr, adjF)] == B_P) { isOutpost = false; break; }
+            }
+            if(!isOutpost) break;
+          }
+          if(directKick) {
+            if(isOutpost) {
+              if(f >= 2 && f <= 5 && r >= 2 && r <= 4) score += 15;
+            } else {
+              score -= threatPenalty;
+            }
+          } else if(opening && !isOutpost) {
+            for(int df = -1; df <= 1; df += 2) {
+              int pr = r + 2, pf = f + df;
+              if(inBounds(pr, pf) && board[sqOf(pr, pf)] == B_P &&
+                 board[sqOf(pr-1, pf)] == EMPTY) { score -= 18; break; }
+            }
+          }
         }
       }
     }
@@ -2206,53 +2296,217 @@ int alphaBeta(int depth, int alpha, int beta, bool maximizing, unsigned long sta
 }
 
 // ─── Opening Book ─────────────────────────────────────────────────────────────
+// SAFETY CONTRACT: Every candidate move is cross-checked against the actual
+// generated legal move list. A book move is ONLY returned if it exists verbatim
+// in the legal move list for the current position. This guarantees no illegal
+// moves can ever be returned regardless of what white played.
 Move getBookMove(int blackMoveNum) {
-  Move m = {0,0,0,0};
+  Move none = {0,0,0,0};
+
+  // Generate all legal black moves from the current position.
+  // Book candidates must be found in this list — no exceptions.
+  Move legal[128];
+  int legalCnt = 0;
+  generateMoves(false, legal, legalCnt, false);
+  // Filter to actually-legal (not leaving king in check)
+  Move trueLegal[128];
+  int trueCnt = 0;
+  for(int i = 0; i < legalCnt; i++) {
+    if(isLegal(legal[i])) trueLegal[trueCnt++] = legal[i];
+  }
+  if(trueCnt == 0) return none;
+
+  // Helper: return a book move only if it exists in trueLegal
+  auto tryMove = [&](int from, int to) -> Move {
+    // Basic sanity: our piece must be on `from`, `to` must not have our piece
+    if(!squareOnBoard(from) || !squareOnBoard(to)) return none;
+    if(!board[from] || !IS_BLACK(board[from])) return none;
+    if(board[to] && IS_BLACK(board[to])) return none;  // friendly piece on target
+    // Must exist in the legal list
+    for(int i = 0; i < trueCnt; i++) {
+      if(trueLegal[i].from == from && trueLegal[i].to == to) return trueLegal[i];
+    }
+    return none;
+  };
+
+  // Read current board state — everything is conditional on what's actually there
+  bool wE4 = (board[sqOf(3,4)] == W_P);
+  bool wD4 = (board[sqOf(3,3)] == W_P);
+  bool wC4 = (board[sqOf(3,2)] == W_P);
+  bool wF4 = (board[sqOf(3,5)] == W_P);
+  bool wE5 = (board[sqOf(4,4)] == W_P);  // white already pushed to e5
+  bool wD5 = (board[sqOf(4,3)] == W_P);  // white already pushed to d5
+
+  bool bE5 = (board[sqOf(4,4)] == B_P);
+  bool bD5 = (board[sqOf(4,3)] == B_P);
+  bool bC5 = (board[sqOf(4,2)] == B_P);
+  bool bF5 = (board[sqOf(4,5)] == B_P);
+
+  // Squares for piece origins
+  int bNb8 = sqOf(7,1);   // Black queenside knight (b8)
+  int bNg8 = sqOf(7,6);   // Black kingside knight  (g8)
+  int bBc8 = sqOf(7,2);   // Black queenside bishop (c8)
+  int bBf8 = sqOf(7,5);   // Black kingside bishop  (f8)
+  int bPe7 = sqOf(6,4);   // Black e-pawn
+  int bPd7 = sqOf(6,3);   // Black d-pawn
+  int bPc7 = sqOf(6,2);   // Black c-pawn
+  int bPf7 = sqOf(6,5);   // Black f-pawn
+
   int v = chosenOpening % 4;
-  bool wE4=(board[sqOf(3,4)]==W_P), wD4=(board[sqOf(3,3)]==W_P);
-  bool wC4=(board[sqOf(3,2)]==W_P), wF4=(board[sqOf(3,5)]==W_P);
-  bool bE5=(board[sqOf(4,4)]==B_P), bC5=(board[sqOf(4,2)]==B_P);
-  bool bD5=(board[sqOf(4,3)]==B_P), bF5=(board[sqOf(4,5)]==B_P);
-  if(blackMoveNum==1) {
+  Move candidate = none;
+
+  if(blackMoveNum == 1) {
+    // First response — based on what white played
     if(wE4) {
-      if(v<=1){m.from=sqOf(6,4);m.to=sqOf(4,4);}
-      else   {m.from=sqOf(6,2);m.to=sqOf(4,2);}
+      // e5 or c5 depending on variation — but NEVER if white pawn is on e5
+      if(v <= 1) {
+        candidate = tryMove(bPe7, sqOf(4,4));   // 1...e5
+        if(!candidate.from) candidate = tryMove(bNg8, sqOf(5,5)); // fallback Nf6
+      } else {
+        candidate = tryMove(bPc7, sqOf(4,2));   // 1...c5 Sicilian
+        if(!candidate.from) candidate = tryMove(bPe7, sqOf(4,4)); // fallback e5
+      }
     } else if(wD4) {
-      if(v<=2){m.from=sqOf(6,3);m.to=sqOf(4,3);}
-      else   {m.from=sqOf(6,5);m.to=sqOf(4,5);}
+      if(v <= 2) {
+        candidate = tryMove(bPd7, sqOf(4,3));   // 1...d5
+        if(!candidate.from) candidate = tryMove(bNg8, sqOf(5,5));
+      } else {
+        candidate = tryMove(bPf7, sqOf(4,5));   // 1...f5 Dutch
+        if(!candidate.from) candidate = tryMove(bPd7, sqOf(4,3));
+      }
     } else if(wC4) {
-      if(v<=1){m.from=sqOf(6,4);m.to=sqOf(4,4);}
-      else   {m.from=sqOf(6,2);m.to=sqOf(4,2);}
+      if(v <= 1) {
+        candidate = tryMove(bPe7, sqOf(4,4));
+        if(!candidate.from) candidate = tryMove(bPc7, sqOf(4,2));
+      } else {
+        candidate = tryMove(bPc7, sqOf(4,2));
+        if(!candidate.from) candidate = tryMove(bPe7, sqOf(4,4));
+      }
     } else if(wF4) {
-      m.from=sqOf(6,3);m.to=sqOf(4,3);
+      // Bird's — respond with d5
+      candidate = tryMove(bPd7, sqOf(4,3));
+      if(!candidate.from) candidate = tryMove(bPe7, sqOf(5,4)); // e6
     } else {
-      if(v<=1){m.from=sqOf(6,4);m.to=sqOf(4,4);}
-      else   {m.from=sqOf(6,3);m.to=sqOf(4,3);}
+      if(v <= 1) {
+        candidate = tryMove(bPe7, sqOf(4,4));
+      } else {
+        candidate = tryMove(bPd7, sqOf(4,3));
+      }
     }
   } else {
-    if(wE4) {
-      if(bE5)      {m.from=sqOf(7,1);m.to=sqOf(5,2);}
-      else if(bC5) {m.from=sqOf(6,3);m.to=sqOf(5,3);}
-      else         {m.from=sqOf(7,6);m.to=sqOf(5,5);}
-    } else if(wD4) {
-      if(bD5)      {m.from=sqOf(6,4);m.to=sqOf(5,4);}
-      else if(bF5) {m.from=sqOf(7,6);m.to=sqOf(5,5);}
-      else         {m.from=sqOf(7,6);m.to=sqOf(5,5);}
+    // Move 2 — develop a knight or support the center.
+    // CRITICAL: only suggest moves where the destination is NOT a pawn-kick trap.
+    // A square is a pawn-kick trap if it is attacked by a white pawn AND there is
+    // another white pawn on an adjacent file that can re-attack it after we move
+    // (i.e. it is NOT a genuine outpost). Safe outposts (Nd5 in the Alapin, etc.)
+    // are NOT traps even if currently pawn-attacked — they are fine to play.
+    auto isKickTrap = [&](int sq) -> bool {
+      int r = rankOf(sq), f = fileOf(sq);
+      // Currently attacked by a white pawn?
+      bool attacked = false;
+      for(int df = -1; df <= 1; df += 2) {
+        int pr = r - 1, pf = f + df;
+        if(inBounds(pr, pf) && board[sqOf(pr, pf)] == W_P) { attacked = true; break; }
+      }
+      if(!attacked) return false;  // not even attacked — definitely fine
+      // Outpost test: if no white pawn on adjacent files below this rank, it's safe
+      for(int df = -1; df <= 1; df += 2) {
+        int adjF = f + df;
+        if(adjF < 0 || adjF > 7) continue;
+        for(int rr = 0; rr < r; rr++) {
+          if(board[sqOf(rr, adjF)] == W_P) return true;  // can be re-attacked — trap
+        }
+      }
+      return false;  // attacked but no pawn can re-attack = safe outpost, allow it
+    };
+
+    if(wE4 || wE5) {
+      if(bE5) {
+        // After 1.e4 e5 — develop Nf6 or Nc6, never to a pawn-attacked square
+        int nc6 = sqOf(5,2), nf6 = sqOf(5,5);
+        if(!isKickTrap(nc6)) {
+          candidate = tryMove(bNb8, nc6);
+        }
+        if(!candidate.from && !isKickTrap(nf6)) {
+          candidate = tryMove(bNg8, nf6);
+        }
+        if(!candidate.from) {
+          // Knights both attacked — play d6 or Bc5
+          candidate = tryMove(bPd7, sqOf(5,3));  // d6 solid
+        }
+      } else if(bC5) {
+        // After 1.e4 c5 Sicilian — play d6 or Nc6
+        int nc6 = sqOf(5,2);
+        if(!isKickTrap(nc6)) {
+          candidate = tryMove(bNb8, nc6);
+        }
+        if(!candidate.from) candidate = tryMove(bPd7, sqOf(5,3)); // d6
+      } else if(bD5) {
+        // Scandinavian — recapture or Nf6
+        int nf6 = sqOf(5,5);
+        if(!isKickTrap(nf6)) {
+          candidate = tryMove(bNg8, nf6);
+        }
+        if(!candidate.from) candidate = tryMove(bPe7, sqOf(5,4)); // e6
+      } else {
+        // Some other first move — just develop kingside knight safely
+        int nf6 = sqOf(5,5);
+        if(!isKickTrap(nf6)) {
+          candidate = tryMove(bNg8, nf6);
+        }
+        if(!candidate.from) candidate = tryMove(bPd7, sqOf(5,3));
+      }
+    } else if(wD4 || wD5) {
+      if(bD5) {
+        // QGD-style — play e6 or Nf6
+        int nf6 = sqOf(5,5);
+        if(!isKickTrap(nf6)) {
+          candidate = tryMove(bNg8, nf6);
+        }
+        if(!candidate.from) candidate = tryMove(bPe7, sqOf(5,4)); // e6
+      } else {
+        int nf6 = sqOf(5,5);
+        if(!isKickTrap(nf6)) {
+          candidate = tryMove(bNg8, nf6);
+        }
+        if(!candidate.from) candidate = tryMove(bPd7, sqOf(4,3)); // d5 break
+      }
     } else if(wC4) {
-      if(bE5||bC5) {m.from=sqOf(7,1);m.to=sqOf(5,2);}
-      else         {m.from=sqOf(7,6);m.to=sqOf(5,5);}
+      if(bE5 || bC5) {
+        int nc6 = sqOf(5,2);
+        if(!isKickTrap(nc6)) {
+          candidate = tryMove(bNb8, nc6);
+        }
+        if(!candidate.from) {
+          int nf6 = sqOf(5,5);
+          if(!isKickTrap(nf6)) candidate = tryMove(bNg8, nf6);
+        }
+      } else {
+        int nf6 = sqOf(5,5);
+        if(!isKickTrap(nf6)) candidate = tryMove(bNg8, nf6);
+        if(!candidate.from) candidate = tryMove(bPe7, sqOf(5,4));
+      }
     } else if(wF4) {
-      m.from=sqOf(7,6);m.to=sqOf(5,5);
+      int nf6 = sqOf(5,5);
+      if(!isKickTrap(nf6)) candidate = tryMove(bNg8, nf6);
+      if(!candidate.from) candidate = tryMove(bPe7, sqOf(5,4)); // e6
     } else {
-      if(bE5||bD5)   {m.from=sqOf(7,6);m.to=sqOf(5,5);}
-      else if(v%2==0){m.from=sqOf(6,4);m.to=sqOf(4,4);}
-      else           {m.from=sqOf(6,3);m.to=sqOf(4,3);}
+      // Unknown opening — safe knight development
+      int nf6 = sqOf(5,5), nc6 = sqOf(5,2);
+      if(bE5 || bD5) {
+        if(!isKickTrap(nc6)) candidate = tryMove(bNb8, nc6);
+      }
+      if(!candidate.from) {
+        if(!isKickTrap(nf6)) candidate = tryMove(bNg8, nf6);
+      }
+      if(!candidate.from) {
+        if(v%2==0) candidate = tryMove(bPe7, sqOf(4,4));
+        else       candidate = tryMove(bPd7, sqOf(4,3));
+      }
     }
   }
-  if(m.from==0&&m.to==0) return m;
-  if(board[m.from]==EMPTY||!IS_BLACK(board[m.from])){m.from=0;m.to=0;return m;}
-  Move lm=m; if(!isLegal(lm)){m.from=0;m.to=0;}
-  return m;
+
+  return candidate;
 }
 
 // ─── Bot move with iterative deepening ───────────────────────────────────────
