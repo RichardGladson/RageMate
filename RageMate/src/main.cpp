@@ -1,5 +1,5 @@
 /*
- * Medusa Beta Chess Engine — v3 UI Edition
+ * Medusa Gamma Chess Engine — v3 UI Edition
  * Changes vs v2:
  *  UI-1. Display flipped 180° (setRotation 3)
  *  UI-2. Undo requires 6-digit password via on-screen keypad
@@ -1433,43 +1433,98 @@ int pisMoveBonus(Move& m) {
   int toR = rankOf(m.to), toF = fileOf(m.to);
   int piece = board[m.from];
 
-  // ── Pawn-kick zone check (outpost-aware) ──────────────────────────────────
-  // Penalise landing on a square attacked by a white pawn ONLY when the square
-  // is not a genuine outpost. An outpost = no white pawn on an adjacent file
-  // at any rank below the landing square (so it can never be kicked again).
-  // This correctly avoids penalising Alapin Nd5, Sicilian outposts, etc.
+  // ── Landing square safety (SEE-based) ────────────────────────────────────
+  // For quiet piece placements (no capture), check whether the landing square
+  // is actually safe using SEE. If the engine places a bishop/knight on a square
+  // where it can be won immediately (e.g. pawn takes, net material loss), heavily
+  // penalise the move. This catches the bishop-for-pawn blunder regardless of
+  // whether it's a pawn kick, a knight fork, or any other attacker.
+  if((TYPE(piece) == KNIGHT || TYPE(piece) == BISHOP) && cap == EMPTY) {
+    // Simulate the piece landing, then evaluate SEE on that square from white's view
+    int pieceVal = PIECE_VAL[TYPE(piece)];
+    int netLoss = seeCaptures(m.to, 1);  // how much white can gain by capturing here
+    // netLoss > 0 means white wins material by capturing our piece on m.to
+    if(netLoss > 0) {
+      // Scale penalty by how bad the loss is
+      // Losing a bishop (330) for a pawn (100) = netLoss ~230 → big penalty
+      bonus -= netLoss * 3;
+    }
+  }
+
+  // ── Pawn-kick zone check (safe-advance-aware) ─────────────────────────────
+  // A square is threatened by a pawn kick ONLY if:
+  //   (a) a white pawn currently attacks it OR can advance to attack it, AND
+  //   (b) that pawn advance is actually safe (SEE >= 0 for white pushing the pawn)
+  // If the pawn can't safely advance (it's defended), no kick will ever happen —
+  // treat as a safe outpost and don't penalise.
   if(TYPE(piece) == KNIGHT || TYPE(piece) == BISHOP) {
-    // Is the landing square directly attacked by a white pawn right now?
+    // Direct kick: white pawn currently on (toR-1, toF±1)
     bool directKick = false;
+    bool kickIsSafe = false;
     for(int df = -1; df <= 1; df += 2) {
       int pr = toR - 1, pf = toF + df;
-      if(inBounds(pr, pf) && board[sqOf(pr, pf)] == W_P) { directKick = true; break; }
+      if(inBounds(pr, pf) && board[sqOf(pr, pf)] == W_P) {
+        directKick = true;
+        // The pawn is already attacking — the kick is already "live"
+        // (it doesn't need to advance; it attacks diagonally from where it is)
+        kickIsSafe = true;
+        break;
+      }
     }
 
-    // Outpost test: no white pawn on adjacent files can ever reach an attack square
+    // Outpost test: no white pawn on adjacent files can ever advance to attack
     bool isOutpost = true;
     for(int df = -1; df <= 1; df += 2) {
       int adjF = toF + df;
       if(adjF < 0 || adjF > 7) continue;
       for(int rr = 0; rr < toR; rr++) {
-        if(board[sqOf(rr, adjF)] == W_P) { isOutpost = false; break; }
+        if(board[sqOf(rr, adjF)] == W_P) {
+          // There's a white pawn below on adjacent file. Can it safely advance
+          // all the way to (toR-1, adjF) to threaten our piece?
+          // Simple check: is the immediate next square empty and safe to push to?
+          int pawnRank = rr;
+          bool pathClear = true;
+          for(int pr = pawnRank + 1; pr <= toR - 1; pr++) {
+            if(board[sqOf(pr, adjF)] != EMPTY) { pathClear = false; break; }
+          }
+          if(pathClear) {
+            // Check if the pawn push to (toR-1, adjF) is safe using SEE
+            // Temporarily simulate the pawn advancing one step at a time is complex;
+            // instead check if the square one rank below our piece on adjF is safe
+            // for a white pawn using seeCaptures on that square
+            int attackSq = sqOf(toR - 1, adjF);
+            uint8_t savedAttSq = board[attackSq];
+            uint8_t savedPawn  = board[sqOf(pawnRank, adjF)];
+            board[attackSq]              = W_P;
+            board[sqOf(pawnRank, adjF)]  = EMPTY;
+            int pawnSafety = seeCaptures(attackSq, 2);  // black capturing the advanced pawn
+            board[attackSq]              = savedAttSq;
+            board[sqOf(pawnRank, adjF)]  = savedPawn;
+            if(pawnSafety <= 0) {
+              // Black can't profitably capture the pawn when it advances → pawn push safe → not an outpost
+              isOutpost = false;
+            }
+            // else: black can capture the advancing pawn (pawn push is losing) → still an outpost
+          }
+          break;
+        }
       }
       if(!isOutpost) break;
     }
 
     if(directKick && !isOutpost) {
-      bonus -= 550;  // genuinely losing tempo — heavy deterrent
+      bonus -= 500;  // genuine tempo loss — pawn attacks and will stay
     } else if(directKick && isOutpost) {
-      // Safe outpost despite being "kicked" to it — actually reward centralisation
+      // Pawn attacks now but can't be reinforced — safe anchor
       bool central = (toF >= 2 && toF <= 5 && toR >= 3 && toR <= 5);
       if(central) bonus += 80;
     } else if(!directKick && !isOutpost) {
-      // Imminent kick: white pawn one push away and square is not safe
+      // Imminent kick: white pawn can safely advance to attack
       for(int df = -1; df <= 1; df += 2) {
         int pr = toR - 2, pf = toF + df;
         if(inBounds(pr, pf) && board[sqOf(pr, pf)] == W_P &&
            board[sqOf(pr+1, pf)] == EMPTY) {
-          bonus -= 220;
+          bonus -= 200;
           break;
         }
       }
@@ -1709,10 +1764,9 @@ int evaluate() {
       if(tp == KNIGHT || tp == BISHOP) {
         int r = rankOf(s), f = fileOf(s);
         // ── Context-aware pawn-kick / outpost evaluation ────────────────────────
-        // Being kicked loses tempo ONLY when the piece has no safe anchor.
-        // If no enemy pawn on adjacent files can ever reach an attack diagonal
-        // (outpost condition), the piece is safely centralised — reward it instead.
-        // This correctly handles Alapin Nd5, Sicilian outposts, etc.
+        // A piece is truly threatened only when the pawn that attacks or will attack
+        // it can safely advance. If the pawn push is losing (defended square), the
+        // piece is on a genuine outpost — reward it, don't penalise it.
         int threatPenalty = opening ? 45 : 30;
 
         if(IS_BLACK(p)) {
@@ -1721,19 +1775,39 @@ int evaluate() {
             int pr = r - 1, pf = f + df;
             if(inBounds(pr, pf) && board[sqOf(pr, pf)] == W_P) { directKick = true; break; }
           }
-          // Outpost: no white pawn on adjacent files at or below this rank
+          // Outpost: check each adjacent-file white pawn — only a non-outpost if
+          // the pawn can safely advance to an attack diagonal
           bool isOutpost = true;
           for(int df = -1; df <= 1; df += 2) {
             int adjF = f + df;
             if(adjF < 0 || adjF > 7) continue;
             for(int rr = 0; rr < r; rr++) {
-              if(board[sqOf(rr, adjF)] == W_P) { isOutpost = false; break; }
+              if(board[sqOf(rr, adjF)] == W_P) {
+                // Can this pawn safely advance to (r-1, adjF)?
+                bool pathClear = true;
+                for(int pr = rr + 1; pr <= r - 1; pr++) {
+                  if(board[sqOf(pr, adjF)] != EMPTY) { pathClear = false; break; }
+                }
+                if(pathClear) {
+                  int attackSq = sqOf(r - 1, adjF);
+                  uint8_t savedA = board[attackSq];
+                  uint8_t savedP = board[sqOf(rr, adjF)];
+                  board[attackSq]        = W_P;
+                  board[sqOf(rr, adjF)]  = EMPTY;
+                  int pawnSafety = seeCaptures(attackSq, 2);
+                  board[attackSq]        = savedA;
+                  board[sqOf(rr, adjF)]  = savedP;
+                  if(pawnSafety <= 0) { isOutpost = false; }  // pawn push safe
+                }
+                break;
+              }
             }
             if(!isOutpost) break;
           }
+
           if(directKick) {
             if(isOutpost) {
-              if(f >= 2 && f <= 5 && r >= 3 && r <= 5) score -= 15; // central outpost bonus
+              if(f >= 2 && f <= 5 && r >= 3 && r <= 5) score -= 15;
             } else {
               score += threatPenalty;
             }
@@ -1745,6 +1819,7 @@ int evaluate() {
             }
           }
         } else {
+          // Mirror for white pieces under black pawn threat
           bool directKick = false;
           for(int df = -1; df <= 1; df += 2) {
             int pr = r + 1, pf = f + df;
@@ -1755,10 +1830,28 @@ int evaluate() {
             int adjF = f + df;
             if(adjF < 0 || adjF > 7) continue;
             for(int rr = 7; rr > r; rr--) {
-              if(board[sqOf(rr, adjF)] == B_P) { isOutpost = false; break; }
+              if(board[sqOf(rr, adjF)] == B_P) {
+                bool pathClear = true;
+                for(int pr = rr - 1; pr >= r + 1; pr--) {
+                  if(board[sqOf(pr, adjF)] != EMPTY) { pathClear = false; break; }
+                }
+                if(pathClear) {
+                  int attackSq = sqOf(r + 1, adjF);
+                  uint8_t savedA = board[attackSq];
+                  uint8_t savedP = board[sqOf(rr, adjF)];
+                  board[attackSq]        = B_P;
+                  board[sqOf(rr, adjF)]  = EMPTY;
+                  int pawnSafety = seeCaptures(attackSq, 1);
+                  board[attackSq]        = savedA;
+                  board[sqOf(rr, adjF)]  = savedP;
+                  if(pawnSafety <= 0) { isOutpost = false; }
+                }
+                break;
+              }
             }
             if(!isOutpost) break;
           }
+
           if(directKick) {
             if(isOutpost) {
               if(f >= 2 && f <= 5 && r >= 2 && r <= 4) score += 15;
@@ -2460,9 +2553,8 @@ Move getBookMove(int blackMoveNum) {
     // Move 2 — develop a knight or support the center.
     // CRITICAL: only suggest moves where the destination is NOT a pawn-kick trap.
     // A square is a pawn-kick trap if it is attacked by a white pawn AND there is
-    // another white pawn on an adjacent file that can re-attack it after we move
-    // (i.e. it is NOT a genuine outpost). Safe outposts (Nd5 in the Alapin, etc.)
-    // are NOT traps even if currently pawn-attacked — they are fine to play.
+    // a white pawn on an adjacent file that can safely advance to re-attack it
+    // (i.e. NOT a genuine outpost). Safe outposts are fine even if currently attacked.
     auto isKickTrap = [&](int sq) -> bool {
       int r = rankOf(sq), f = fileOf(sq);
       // Currently attacked by a white pawn?
@@ -2471,16 +2563,33 @@ Move getBookMove(int blackMoveNum) {
         int pr = r - 1, pf = f + df;
         if(inBounds(pr, pf) && board[sqOf(pr, pf)] == W_P) { attacked = true; break; }
       }
-      if(!attacked) return false;  // not even attacked — definitely fine
-      // Outpost test: if no white pawn on adjacent files below this rank, it's safe
+      if(!attacked) return false;
+      // Check each adjacent file for a white pawn that can safely advance to threaten
       for(int df = -1; df <= 1; df += 2) {
         int adjF = f + df;
         if(adjF < 0 || adjF > 7) continue;
         for(int rr = 0; rr < r; rr++) {
-          if(board[sqOf(rr, adjF)] == W_P) return true;  // can be re-attacked — trap
+          if(board[sqOf(rr, adjF)] == W_P) {
+            bool pathClear = true;
+            for(int pr = rr + 1; pr <= r - 1; pr++) {
+              if(board[sqOf(pr, adjF)] != EMPTY) { pathClear = false; break; }
+            }
+            if(pathClear) {
+              int attackSq = sqOf(r - 1, adjF);
+              uint8_t savedA = board[attackSq];
+              uint8_t savedP = board[sqOf(rr, adjF)];
+              board[attackSq]       = W_P;
+              board[sqOf(rr, adjF)] = EMPTY;
+              int pawnSafety = seeCaptures(attackSq, 2);
+              board[attackSq]       = savedA;
+              board[sqOf(rr, adjF)] = savedP;
+              if(pawnSafety <= 0) return true;  // pawn push is safe → it's a trap
+            }
+            break;
+          }
         }
       }
-      return false;  // attacked but no pawn can re-attack = safe outpost, allow it
+      return false;  // attacked but no pawn can safely advance → safe outpost
     };
 
     if(wE4 || wE5) {
@@ -3918,7 +4027,7 @@ void playIntroCutscene() {
   };
   int versionCount = 8;
 
-  scrollNameAnimation(55, 61, 97, 14, versionNames, versionCount, "Beta", 0x47E4);
+  scrollNameAnimation(55, 61, 97, 14, versionNames, versionCount, "Gamma", 0x47E4);
 
   // ── Final locked display ──────────────────────────────────────
   delay(150);
@@ -3931,7 +4040,7 @@ void playIntroCutscene() {
   tft.fillRect(0, 82, 160, 1, 0x03E0);
   tft.fillRect(0, 83, 160, 28, 0x0020);
 
-  // "Medusa | Beta" centered in summary band
+  // "Medusa | Gamma" centered in summary band
   tft.setTextSize(1);
   tft.setTextColor(0x07E0);
   tft.setCursor(36, 90);
@@ -3941,7 +4050,7 @@ void playIntroCutscene() {
   tft.print("|");
   tft.setTextColor(0x47E4);
   tft.setCursor(88, 90);
-  tft.print("Beta");
+  tft.print("Gamma");
 
   // Thin rule
   tft.drawFastHLine(10, 101, 140, 0x03A0);
