@@ -1868,6 +1868,34 @@ int evaluate() {
   // Subtracts from score (evaluate is white-relative; PIS delta is black-relative)
   score -= positionalIntelligenceDelta();
 
+  // ── Opening structural penalties ──────────────────────────────────────────
+  // These fire only in the opening and target specific bad-structure patterns.
+  if(opening) {
+    // Nc6 blocking c7 pawn: Black knight on c6 while c-pawn still on c7.
+    // This is almost always wrong in d4 openings — black needs ...c5 or ...c6 to
+    // fight the center. The knight permanently blocks that option.
+    if(board[sqOf(5,2)] == B_N && board[sqOf(6,2)] == B_P) {
+      // Check if white has a pawn on d4 or d5 (the openings where c-pawn matters)
+      bool wHasCenter = (board[sqOf(3,3)] == W_P || board[sqOf(4,3)] == W_P);
+      if(wHasCenter) score += 45;  // bad for black (+score = good for white)
+    }
+
+    // Mirror: Nc3 blocking c2 pawn for white (less common but same logic)
+    if(board[sqOf(2,2)] == W_N && board[sqOf(1,2)] == W_P) {
+      bool bHasCenter = (board[sqOf(4,3)] == B_P || board[sqOf(3,3)] == B_P);
+      if(bHasCenter) score -= 45;
+    }
+
+    // Knight on a square where it will be kicked again next move (chain-kick trap).
+    // Detect: black knight on e5 while white has a pawn on f3 or f2 that can push to f4.
+    // This is the Ne5→f4 kick pattern described in the Dutch/Alapin analysis.
+    if(board[sqOf(3,4)] == B_N) {  // black knight on e5 (rank 3 from white's perspective = rank 4 = e5)
+      bool f4threat = (board[sqOf(3,5)] == W_P) ||  // white pawn already on f4
+                      (board[sqOf(2,5)] == W_P && board[sqOf(3,5)] == EMPTY);  // f3 can push f4
+      if(f4threat) score += 35;  // knight will be kicked again
+    }
+  }
+
   return score;
 }
 
@@ -1980,11 +2008,16 @@ int moveScore(Move& m) {
   }
 
   if(m.from == lastBlackTo && cap == EMPTY) {
-    s -= 600;
+    // Moving the very piece we just moved last turn — severe tempo waste
+    s -= 800;
   }
 
-  if((bPieceMoved & (1ULL << m.from)) && cap == EMPTY && undevMinors > 0) {
-    s -= 500;
+  // Re-moving a piece that has already moved this game, with undeveloped pieces at home.
+  // Scale penalty by how many pieces are still undeveloped — the more undeveloped
+  // pieces remain, the worse it is to waste tempo on a piece that already moved.
+  if((bPieceMoved & (1ULL << m.from)) && cap == EMPTY) {
+    int penalty = 400 + undevMinors * 120;  // 400 base + 120 per undeveloped minor
+    s -= penalty;
   }
 
   if(TYPE(piece)==KNIGHT) {
@@ -2235,6 +2268,36 @@ int alphaBeta(int depth, int alpha, int beta, bool maximizing, unsigned long sta
     Move& m = moves[i];
     if(!isLegal(m)) continue;
     legalCount2++;
+
+    // ── Opening repeat-mover pruning ────────────────────────────────────────
+    // During the opening, if a piece has already moved this game and there are
+    // undeveloped pieces at home, skip re-moving it unless:
+    //   (a) it's a capture (forcing/material)
+    //   (b) it's castling
+    //   (c) it's the only legal move (handled by legalCount2 == 0 fallback)
+    //   (d) depth <= 1 (near-leaf — let quiescence handle tactical followups)
+    // This directly prunes the Nc6→Ne5 re-kick chain and similar patterns.
+    if(depth >= 2 && isOpeningPhase() && !inCheck) {
+      int mover = board[m.from];
+      bool isBLack = IS_BLACK(mover);
+      bool reMove = isBLack
+        ? ((bPieceMoved & (1ULL << m.from)) != 0)
+        : false;  // only apply to engine (black) for now
+      if(reMove && board[m.to] == EMPTY && m.flags == 0 && m.promo == 0) {
+        // Count undeveloped black minors
+        int undev = 0;
+        if(board[sqOf(7,1)]==B_N) undev++;
+        if(board[sqOf(7,6)]==B_N) undev++;
+        if(board[sqOf(7,2)]==B_B) undev++;
+        if(board[sqOf(7,5)]==B_B) undev++;
+        if(undev >= 2) {
+          // Skip this move — developing a new piece is almost always better
+          // (legalCount2 already incremented, but we won't search it)
+          legalCount2--;
+          continue;
+        }
+      }
+    }
 
     if(depth==1 && !inCheck && board[m.to]==EMPTY && !m.promo) {
       int ev = whiteToMove ? evaluate() : -evaluate();
