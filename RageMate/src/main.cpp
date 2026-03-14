@@ -66,8 +66,8 @@ Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_MOSI, TFT_SCLK, TFT_RS
 #define C_GAMEOVER         0x07E0   // bright green game-over text
 #define C_BTN_BG           0x0180   // dark green button bg
 #define C_BTN_HL           0x03E0   // mid green button highlight
-#define C_PB_EMPTY         0x0060   // dark progress bar empty
-#define C_PB_BORDER        0x03E0   // green progress bar border
+#define C_PB_EMPTY         0x0020   // near-black segment background
+#define C_PB_BORDER        0x03A0   // dim green bar outer frame
 
 // Progress bar
 #define PB_X   130
@@ -156,27 +156,24 @@ uint32_t currentHash;
 // ─── Progress bar ───────────────────────────────────────────────────────────
 int8_t dispPct = -1;
 
-// Progress bar gradient — pure green ramp from dim to blazing bright
-// 96 entries, RGB565, dark green → mid green → bright #00FF00 → pale flash
-const uint16_t PROGMEM pbGrad[96] = {
-  // 0-15: very dark → dark green
-  0x0020,0x0040,0x0060,0x0080,0x00A0,0x00C0,0x00E0,0x0100,
-  0x0120,0x0140,0x0160,0x0180,0x01A0,0x01C0,0x01E0,0x0200,
-  // 16-31: dark → medium green
-  0x0220,0x0240,0x0260,0x0280,0x02A0,0x02C0,0x02E0,0x0300,
-  0x0320,0x0340,0x0360,0x0380,0x03A0,0x03C0,0x03E0,0x03E0,
-  // 32-47: medium → bright green
-  0x03E0,0x04A0,0x0500,0x0520,0x0540,0x0560,0x0580,0x05A0,
-  0x05C0,0x05E0,0x0600,0x0620,0x0640,0x0660,0x0680,0x06A0,
-  // 48-63: approaching full bright
-  0x06C0,0x06E0,0x0700,0x0720,0x0740,0x0760,0x0780,0x07A0,
-  0x07C0,0x07E0,0x07E0,0x07E0,0x07E0,0x07E0,0x07E0,0x07E0,
-  // 64-79: bright green with white mixing (pale flash at top)
-  0x07E0,0x0FE2,0x17E4,0x1FE4,0x27E4,0x2FE4,0x37E4,0x3FE4,
-  0x47E4,0x4FE4,0x57E4,0x5FE4,0x67E6,0x6FE6,0x77E6,0x7FE6,
-  // 80-89: pale green → near white-green (top of bar is almost blinding)
-  0x87E6,0x8FE8,0x97E8,0x9FE8,0xA7E8,0xAFEA,0xB7EA,0xBFEA,
-  0xC7EC,0xCFEC,0xD7EC,0xDFEC,0xE7EE,0xEFEE,0xF7EE,0xFFEE,
+// Progress bar: segmented block design.
+// The bar is divided into 12 equal segments (8px each = 96px total).
+// Empty segments show as dark green outlines, filled segments are solid green.
+// Brightness increases toward the top: bottom = dim, top = bright.
+// This avoids the invisible near-black bottom problem entirely.
+const uint16_t PROGMEM pbSegColors[12] = {
+  0x0180,  // seg 0  (bottom)  — darkest green fill
+  0x0200,
+  0x0280,
+  0x0300,
+  0x03A0,
+  0x03E0,
+  0x03E0,
+  0x05E0,
+  0x05E0,
+  0x07E0,
+  0x07E0,
+  0x07E0,  // seg 11 (top)    — brightest green fill
 };
 
 // ─── UI state ───────────────────────────────────────────────────────────────
@@ -216,24 +213,32 @@ const int8_t PST_PAWN[64] PROGMEM = {
   -5, -5, -8,-15,-15, -8, -5, -5,
    0,  0,  0,  0,  0,  0,  0,  0
 };
+// Knight PST: prefer squares that are either protected by own pawns or
+// not easily kicked by advancing enemy pawns. The raw center (d4/e4/d5/e5)
+// is slightly less attractive than squares with pawn protection (c3/f3/c6/f6).
+// d4/e5 squares give a shorter bonus — the kick-proof evaluation layer adds
+// the context-sensitive adjustment at runtime.
 const int8_t PST_KNIGHT[64] PROGMEM = {
   -50,-40,-30,-30,-30,-30,-40,-50,
-  -40,-20,  0,  0,  0,  0,-20,-40,
-  -30,  0,  8, 12, 12,  8,  0,-30,
-  -30,  4, 12, 16, 16, 12,  4,-30,
-  -30,  0, 12, 16, 16, 12,  0,-30,
-  -30,  4,  8, 12, 12,  8,  4,-30,
+  -40,-20,  0,  2,  2,  0,-20,-40,
+  -30,  2, 10, 12, 12, 10,  2,-30,
+  -30,  4, 12, 14, 14, 12,  4,-30,
+  -30,  4, 12, 14, 14, 12,  4,-30,
+  -30,  4, 10, 12, 12, 10,  4,-30,
   -40,-20,  0,  4,  4,  0,-20,-40,
   -50,-40,-30,-30,-30,-30,-40,-50
 };
+// Bishop PST: long diagonals preferred but not so strongly central that
+// the bishop rushes to squares like c4/b5 where it can be kicked by b4/a4/c3.
+// The kick-proof evaluation layer handles the dynamic penalty at runtime.
 const int8_t PST_BISHOP[64] PROGMEM = {
   -20,-10,-10,-10,-10,-10,-10,-20,
   -10,  0,  0,  0,  0,  0,  0,-10,
-  -10,  0,  5, 10, 10,  5,  0,-10,
-  -10,  5,  5, 10, 10,  5,  5,-10,
-  -10,  0, 10, 10, 10, 10,  0,-10,
-  -10, 10, 10, 10, 10, 10, 10,-10,
-  -10,  5,  0,  0,  0,  0,  5,-10,
+  -10,  0,  6,  8,  8,  6,  0,-10,
+  -10,  4,  6,  8,  8,  6,  4,-10,
+  -10,  0,  8,  8,  8,  8,  0,-10,
+  -10,  6,  8,  8,  8,  8,  6,-10,
+  -10,  4,  0,  0,  0,  0,  4,-10,
   -20,-10,-10,-10,-10,-10,-10,-20
 };
 const int8_t PST_ROOK[64] PROGMEM = {
@@ -1124,19 +1129,59 @@ int evaluate() {
         // Extra sting in opening: being kicked by a pawn loses a full tempo
         int threatPenalty = opening ? 45 : 30;
         if(IS_BLACK(p)) {
+          // Immediate pawn threat (pawn already attacking this square)
           bool pawnthreat = false;
           for(int df = -1; df <= 1; df += 2) {
             int pr = r - 1, pf = f + df;
             if(inBounds(pr, pf) && board[sqOf(pr, pf)] == W_P) { pawnthreat = true; break; }
           }
           if(pawnthreat) score += threatPenalty;
+
+          // ── Proactive kick-proof: penalize squares a W_P can advance to attack ─
+          // A white pawn 1 or 2 squares below on an adjacent file can kick this piece.
+          // Only penalize in opening, only for squares that aren't intrinsically safe.
+          if(opening) {
+            bool canBeKickedSoon = false;
+            for(int df = -1; df <= 1; df += 2) {
+              int af = f + df;
+              if(af < 0 || af > 7) continue;
+              // Pawn 1 rank below that could push 1 step and attack
+              if(inBounds(r-2, af) && board[sqOf(r-2, af)] == W_P
+                 && board[sqOf(r-1, af)] == EMPTY) { canBeKickedSoon = true; break; }
+              // Pawn 2 ranks below that could push 2 steps (from rank 1) and attack
+              if(inBounds(r-3, af) && board[sqOf(r-3, af)] == W_P
+                 && rankOf(sqOf(r-3,af)) == 1   // only pawn on starting rank can double-push
+                 && board[sqOf(r-2, af)] == EMPTY
+                 && board[sqOf(r-1, af)] == EMPTY) { canBeKickedSoon = true; break; }
+            }
+            // Exempt Black pieces on back-rank zones (ranks 6–7) where they are safe from this
+            if(canBeKickedSoon && r <= 5) score += 18;
+          }
         } else {
+          // Immediate pawn threat
           bool pawnthreat = false;
           for(int df = -1; df <= 1; df += 2) {
             int pr = r + 1, pf = f + df;
             if(inBounds(pr, pf) && board[sqOf(pr, pf)] == B_P) { pawnthreat = true; break; }
           }
           if(pawnthreat) score -= threatPenalty;
+
+          // ── Proactive kick-proof for White pieces ─────────────────────────────
+          if(opening) {
+            bool canBeKickedSoon = false;
+            for(int df = -1; df <= 1; df += 2) {
+              int af = f + df;
+              if(af < 0 || af > 7) continue;
+              if(inBounds(r+2, af) && board[sqOf(r+2, af)] == B_P
+                 && board[sqOf(r+1, af)] == EMPTY) { canBeKickedSoon = true; break; }
+              if(inBounds(r+3, af) && board[sqOf(r+3, af)] == B_P
+                 && rankOf(sqOf(r+3,af)) == 6
+                 && board[sqOf(r+2, af)] == EMPTY
+                 && board[sqOf(r+1, af)] == EMPTY) { canBeKickedSoon = true; break; }
+            }
+            // Exempt White pieces on ranks 0–1 (own back territory — safe)
+            if(canBeKickedSoon && r >= 2) score -= 18;
+          }
         }
       }
     }
@@ -2015,14 +2060,15 @@ void drawPhaseIndicator() {
 // x,y = top-left corner of the icon area (fits in 13x34 panel space)
 void drawFlagIcon(int bx, int by) {
   tft.fillRoundRect(bx, by, 13, 34, 2, C_BTN_BG);
-  
-  int poleX = bx + 4;
+
+  int poleX   = bx + 4;
   int poleTop = by + 4;
   int poleBot = by + 29;
-  tft.drawFastVLine(poleX,   poleTop, poleBot - poleTop + 1, 0x03E0);  // bright green pole
-  tft.drawFastVLine(poleX+1, poleTop, poleBot - poleTop + 1, 0x0180);  // dark shadow
+  // Pole stays gray/dark — neutral
+  tft.drawFastVLine(poleX,   poleTop, poleBot - poleTop + 1, 0x8410);  // mid-gray pole
+  tft.drawFastVLine(poleX+1, poleTop, poleBot - poleTop + 1, 0x4208);  // dark shadow
 
-  // Bright green triangular flag
+  // Red triangular flag — three shades of red for depth
   int flagStartY = poleTop;
   int flagH = 11;
   for(int row = 0; row < flagH; row++) {
@@ -2031,13 +2077,17 @@ void drawFlagIcon(int bx, int by) {
     for(int px = 0; px < w; px++) {
       int fx = poleX + 2 + px;
       if(fx < bx + 13) {
-        uint16_t c = (row == 0) ? 0x47E4 : (px == w-1) ? 0x03E0 : 0x07E0;
+        uint16_t c;
+        if(row == 0)         c = 0xFB00;  // bright orange-red top edge
+        else if(px == w-1)   c = 0x8000;  // dark red trailing edge (shadow)
+        else                 c = 0xF800;  // pure red body
         tft.drawPixel(fx, rowY, c);
       }
     }
   }
 
-  tft.drawFastHLine(poleX - 1, poleBot + 1, 4, 0x0300);
+  // Base of pole — dark gray foot
+  tft.drawFastHLine(poleX - 1, poleBot + 1, 4, 0x4208);
 }
 
 void drawLeftPanel() {
@@ -2064,49 +2114,70 @@ void drawLeftPanel() {
   tft.drawFastVLine(13, 4, 104, 0x03A0);
 }
 
+// Segmented progress bar: 12 blocks of 7px height with 1px gap between.
+// Empty blocks = dark green outline on near-black fill.
+// Filled blocks = solid green, brightness increases toward top.
+// The bar border and percentage label use the top-segment color.
+#define PB_SEGS      12
+#define PB_SEG_H      7   // fill height per segment
+#define PB_SEG_GAP    1   // gap between segments
+#define PB_SEG_TOTAL  (PB_SEG_H + PB_SEG_GAP)  // 8px per segment slot
+// Total bar inner height = 12 * 8 - 1 = 95px (fits in PB_IH=96)
+
 void drawProgressBar(int pct) {
   if(pct == dispPct) return;
 
   int oldPct = dispPct;
-  dispPct = pct;
+  dispPct    = pct;
 
-  if(pct == 0 || oldPct < 0) {
-    tft.fillRect(PB_X+1, PB_Y+1, PB_IW, PB_IH, C_PB_EMPTY);
-    for(int y=0; y<PB_IH+2; y++) {
-      int gi = (y * 95) / (PB_IH+1);
-      uint16_t bc = pgm_read_word(&pbGrad[gi]);
-      tft.drawPixel(PB_X,         PB_Y+y, bc);
-      tft.drawPixel(PB_X+PB_IW+1, PB_Y+y, bc);
+  // How many segments should be filled (0–12)
+  int filledSegs = (pct * PB_SEGS + 50) / 100;  // rounded
+  if(filledSegs > PB_SEGS) filledSegs = PB_SEGS;
+
+  // Draw outer border on first call or reset
+  if(oldPct < 0 || pct == 0) {
+    // Outer frame — dim green border
+    tft.drawRect(PB_X-1, PB_Y-1, PB_IW+4, PB_IH+3, 0x03A0);
+    // Fill entire bar area with near-black background
+    tft.fillRect(PB_X+1, PB_Y+1, PB_IW, PB_IH, 0x0020);
+    // Draw all 12 empty segment outlines
+    for(int s = 0; s < PB_SEGS; s++) {
+      // Segment 0 is at the BOTTOM, segment 11 at the TOP
+      int sy = PB_Y + 1 + (PB_IH - (s+1)*PB_SEG_TOTAL) + PB_SEG_GAP;
+      // Empty outline: very dim green rect
+      tft.drawRect(PB_X+1, sy, PB_IW-2, PB_SEG_H, 0x0180);
     }
-    tft.drawFastHLine(PB_X, PB_Y,         PB_IW+2, pgm_read_word(&pbGrad[0]));
-    tft.drawFastHLine(PB_X, PB_Y+PB_IH+1, PB_IW+2, pgm_read_word(&pbGrad[95]));
-    tft.fillRect(PB_X-2, 112, 20, 9, C_BG);
-    tft.setTextColor(pgm_read_word(&pbGrad[0]));
-    tft.setTextSize(1);
-    tft.setCursor(PB_X, 113);
-    tft.print("00%");
-    return;
   }
 
-  int oldH = (PB_IH * max(0, oldPct)) / 100;
-  int newH = (PB_IH * pct) / 100;
+  // Recompute old filled count
+  int oldFilled = (max(0,oldPct) * PB_SEGS + 50) / 100;
+  if(oldFilled > PB_SEGS) oldFilled = PB_SEGS;
 
-  if(newH > oldH) {
-    for(int y = oldH; y < newH; y++) {
-      int gradIdx = (y * 95) / PB_IH;
-      if(gradIdx > 95) gradIdx = 95;
-      uint16_t c = pgm_read_word(&pbGrad[gradIdx]);
-      int yy = PB_Y + 1 + PB_IH - 1 - y;
-      tft.drawFastHLine(PB_X+1, yy, PB_IW, c);
+  // Update only changed segments
+  for(int s = 0; s < PB_SEGS; s++) {
+    bool shouldBeFilled = (s < filledSegs);
+    bool wasFilled      = (s < oldFilled);
+    if(shouldBeFilled == wasFilled && oldPct >= 0) continue;  // no change
+
+    int sy = PB_Y + 1 + (PB_IH - (s+1)*PB_SEG_TOTAL) + PB_SEG_GAP;
+    uint16_t segCol = pgm_read_word(&pbSegColors[s]);
+
+    if(shouldBeFilled) {
+      // Fill solid with segment color
+      tft.fillRect(PB_X+2, sy+1, PB_IW-4, PB_SEG_H-2, segCol);
+      tft.drawRect(PB_X+1, sy,   PB_IW-2, PB_SEG_H,   segCol);
+    } else {
+      // Clear back to dark, re-draw dim outline
+      tft.fillRect(PB_X+1, sy, PB_IW-2, PB_SEG_H, 0x0020);
+      tft.drawRect(PB_X+1, sy, PB_IW-2, PB_SEG_H, 0x0180);
     }
-  } else if(newH < oldH) {
-    tft.fillRect(PB_X+1, PB_Y+1, PB_IW, oldH - newH, C_PB_EMPTY);
   }
 
+  // Percentage label below bar — color matches top filled segment
   tft.fillRect(PB_X-2, 112, 20, 9, C_BG);
-  int gradIdx = (pct * 95) / 100;
-  if(gradIdx > 95) gradIdx = 95;
-  uint16_t tc = pgm_read_word(&pbGrad[gradIdx]);
+  uint16_t tc = (filledSegs > 0)
+    ? pgm_read_word(&pbSegColors[min(filledSegs-1, PB_SEGS-1)])
+    : 0x0180;
   tft.setTextColor(tc);
   tft.setTextSize(1);
   tft.setCursor(PB_X, 113);
@@ -2622,39 +2693,33 @@ void showResignScreen() {
   tft.drawFastHLine(cx-14, cy+10, 28, 0x0300);
   tft.fillRect(cx-14, cy+11, 28, 2, 0x0180);
 
-  // "YOU RESIGNED" — green shimmer gradient
+  // "YOU RESIGNED" — uniform bright green, no per-letter color switching
   {
     tft.setTextSize(1);
     const char* t1 = "YOU RESIGNED";
     int l = strlen(t1);
     int x0 = (160 - l*6) / 2;
-    const uint16_t grad[12] = {
-      0x03E0,0x07E0,0x47E4,0xFFFF,0x47E4,0x07E0,
-      0x03E0,0x07E0,0x47E4,0xFFFF,0x47E4,0x07E0
-    };
-    for(int i = 0; i < l; i++) {
-      tft.setTextColor(grad[i % 12]);
-      tft.setCursor(x0 + i*6, 52);
-      tft.print(t1[i]);
-    }
+    tft.setTextColor(0x07E0);
+    tft.setCursor(x0, 52);
+    tft.print(t1);
   }
 
   tft.drawFastHLine(20, 63, 120, 0x03A0);
 
-  // "GAME OVER"
+  // "GAME OVER" — mid green
   {
     const char* go = "GAME OVER";
     int gl = strlen(go);
-    tft.setTextColor(0x03E0);
+    tft.setTextColor(0x05E0);
     tft.setCursor((160 - gl*6) / 2, 68);
     tft.print(go);
   }
 
-  // "You lost."
+  // "You lost." — same mid green, slightly dimmer
   {
     const char* yl = "You lost.";
     int yll = strlen(yl);
-    tft.setTextColor(0x07E0);
+    tft.setTextColor(0x03E0);
     tft.setCursor((160 - yll*6) / 2, 80);
     tft.print(yl);
   }
@@ -2663,16 +2728,15 @@ void showResignScreen() {
   tft.fillRect(0, 108, 160, 1, 0x03A0);
   tft.fillRect(0, 109, 160, 19, 0x0060);
 
-  // Piece row — alternating green shades
-  const uint16_t pieceCol[6] = {0x07E0,0x03E0,0x07E0,0x03E0,0x07E0,0x03E0};
+  // Piece row — single consistent dim green
   const char pieceChars[6] = {'K','Q','R','B','N','P'};
   for(int i = 0; i < 6; i++) {
-    tft.setTextColor(pieceCol[i]);
+    tft.setTextColor(0x03E0);
     tft.setCursor(14 + i*22, 111);
     tft.print(pieceChars[i]);
   }
 
-  tft.drawFastHLine(0, 127, 160, 0x07E0);
+  tft.drawFastHLine(0, 127, 160, 0x03E0);
 
   while(digitalRead(JOY_SW) == LOW) { yield(); delay(10); }
   while(digitalRead(JOY_SW) != LOW) { yield(); delay(20); }
@@ -2698,57 +2762,54 @@ void showCheckmateScreen() {
   tft.fillRect(0, 0, 160, 3, 0xF800);
   tft.fillRect(0, 3, 160, 1, 0x8000);
 
-  // Fallen king — red crown (defeated)
+  // Fallen king — dark red body, bright green cross (defeated by the machine)
   int cx = 80, cy = 28;
-  tft.fillRect(cx-10, cy+4, 20, 6, 0x8000);
-  tft.fillRect(cx-10, cy, 3, 5, 0x8000);
-  tft.fillRect(cx-2,  cy-2, 5, 7, 0xF800);
-  tft.fillRect(cx+7,  cy, 3, 5, 0x8000);
-  tft.fillRect(cx-2,  cy-6, 5, 5, 0xF800);
-  tft.fillRect(cx-5,  cy-3, 11, 2, 0xF800);
+  tft.fillRect(cx-10, cy+4, 20, 6, 0x8000);   // dark red crown body
+  tft.fillRect(cx-10, cy,   3,  5, 0x8000);   // left point
+  tft.fillRect(cx-2,  cy-2, 5,  7, 0x03E0);   // center cross arm — green
+  tft.fillRect(cx+7,  cy,   3,  5, 0x8000);   // right point
+  tft.fillRect(cx-2,  cy-6, 5,  5, 0x03E0);   // cross vertical — green
+  tft.fillRect(cx-5,  cy-3, 11, 2, 0x03E0);   // cross horizontal — green
   tft.drawFastHLine(cx-14, cy+10, 28, 0x4000);
   tft.fillRect(cx-14, cy+11, 28, 2, 0x2000);
 
-  // "YOU LOST" — alternating red pulses
+  // "YOU LOST" — solid bright red, uniform
   {
     tft.setTextSize(2);
     const char* t1 = "YOU LOST";
     int tlen = strlen(t1);
     int tx0 = (160 - tlen*12)/2;
-    const uint16_t tgrad[8] = {0xF800,0xF800,0xA000,0xF800,0xF800,0xA000,0xF800,0xA000};
-    for(int i = 0; i < tlen; i++) {
-      tft.setTextColor(tgrad[i % 8]);
-      tft.setCursor(tx0 + i*12, 48);
-      tft.print(t1[i]);
-    }
+    tft.setTextColor(0xF800);
+    tft.setCursor(tx0, 48);
+    tft.print(t1);
   }
 
-  tft.drawFastHLine(20, 68, 120, 0x8000);
+  tft.drawFastHLine(20, 68, 120, 0x6000);
 
-  // "CHECKMATE" — dim green (the machine speaks)
+  // "CHECKMATE" — bright green (machine announces it coldly)
   {
     const char* go = "CHECKMATE";
     int gl = strlen(go);
-    tft.setTextColor(0x03E0);
+    tft.setTextColor(0x07E0);
     tft.setCursor((160 - gl*6) / 2, 73);
     tft.print(go);
   }
 
-  // "Black wins." — bright green
+  // "Black wins." — mid green
   {
     const char* yl = "Black wins.";
     int yll = strlen(yl);
-    tft.setTextColor(0x07E0);
+    tft.setTextColor(0x03E0);
     tft.setCursor((160 - yll*6) / 2, 85);
     tft.print(yl);
   }
 
-  // Bottom bar
-  tft.fillRect(0, 108, 160, 1, 0x8000);
+  // Bottom bar — dark red
+  tft.fillRect(0, 108, 160, 1, 0x6000);
   tft.fillRect(0, 109, 160, 19, 0x0800);
 
-  // Piece row — red accents
-  const uint16_t pieceCol[6] = {0xF800,0xA000,0xF800,0xA000,0xF800,0xA000};
+  // Piece row — alternating red/green (the two sides)
+  const uint16_t pieceCol[6] = {0xF800,0x03E0,0xF800,0x03E0,0xF800,0x03E0};
   const char pieceChars2[6] = {'K','Q','R','B','N','P'};
   for(int i = 0; i < 6; i++) {
     tft.setTextColor(pieceCol[i]);
@@ -2756,7 +2817,9 @@ void showCheckmateScreen() {
     tft.print(pieceChars2[i]);
   }
 
-  tft.drawFastHLine(0, 127, 160, 0xF800);
+  // Bottom edge — half red half green
+  tft.drawFastHLine(0,   127, 80, 0xF800);
+  tft.drawFastHLine(80,  127, 80, 0x03E0);
 
   delay(1500);
 }
@@ -2976,23 +3039,21 @@ void playIntroCutscene() {
     }
   }
 
-  // "RageMate" — bold, green shimmer gradient
+  // "RageMate" — steady bright green, slight shimmer with pale mid-green only
   {
     tft.setTextSize(2);
     const char* title = "RageMate";
     int tlen = strlen(title);
     int tx0 = (160 - tlen*12)/2;
-    // Shimmer: dim→bright→pale
-    const uint16_t tgrad[8] = {0x03E0,0x07E0,0x47E4,0xFFFF,0x47E4,0x07E0,0x03E0,0x07E0};
+    // Tight shimmer: all green, just brightness variation — no white spike
+    const uint16_t tgrad[8] = {0x03E0,0x05E0,0x07E0,0x07E0,0x07E0,0x05E0,0x03E0,0x05E0};
     for(int i = 0; i < tlen; i++) {
       tft.setTextColor(tgrad[i % 8]);
       tft.setCursor(tx0 + i*12, 8);
       tft.print(title[i]);
     }
-    // Underline: green dash per letter
-    for(int i = 0; i < tlen; i++) {
-      tft.drawFastHLine(tx0 + i*12, 26, 10, tgrad[i % 8]);
-    }
+    // Underline: uniform mid-green
+    tft.drawFastHLine(tx0, 26, tlen*12 - 2, 0x03E0);
   }
 
   // Separator below header
@@ -3052,22 +3113,21 @@ void playIntroCutscene() {
   tft.fillRect(0, 82, 160, 1, 0x03E0);
   tft.fillRect(0, 83, 160, 28, 0x0020);
 
-  // "Mecha | Beta" in one bright line
+  // "Mecha | Beta" in one bright line — centered
   tft.setTextSize(1);
-  tft.setTextColor(0x07E0);
-  tft.setCursor(20, 88);
-  tft.print("Mecha");
-  tft.setTextColor(0x03A0);
-  tft.setCursor(58, 88);
-  tft.print("|");
-  tft.setTextColor(0x47E4);
-  tft.setCursor(66, 88);
-  tft.print("Beta");
-
-  // Tiny "by Richard" credit
-  tft.setTextColor(0x0300);
-  tft.setCursor(112, 88);
-  tft.print("by Richard");
+  {
+    // Center the combined label "Mecha  |  Beta"
+    int cx2 = (160 - (5+3+4)*6) / 2;  // rough center
+    tft.setTextColor(0x07E0);
+    tft.setCursor(cx2, 88);
+    tft.print("Mecha");
+    tft.setTextColor(0x03A0);
+    tft.setCursor(cx2 + 36, 88);
+    tft.print("|");
+    tft.setTextColor(0x47E4);
+    tft.setCursor(cx2 + 44, 88);
+    tft.print("Beta");
+  }
 
   // Thin rule
   tft.drawFastHLine(10, 98, 140, 0x03A0);
@@ -3076,11 +3136,6 @@ void playIntroCutscene() {
   tft.setTextColor(0x07E0);
   tft.setCursor(28, 103);
   tft.print("> press to begin <");
-
-  // Tiny model tag at very bottom
-  tft.setTextColor(0x0300);
-  tft.setCursor(50, 116);
-  tft.print("v4.6 // ESP32");
 
   // Bottom edge accent
   tft.drawFastHLine(0, 127, 160, 0x03E0);
