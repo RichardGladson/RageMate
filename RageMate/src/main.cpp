@@ -1,5 +1,5 @@
 /*
- * Medusa Alpha Chess Engine — v3 UI Edition
+ * Medusa Beta Chess Engine — v3 UI Edition
  * Changes vs v2:
  *  UI-1. Display flipped 180° (setRotation 3)
  *  UI-2. Undo requires 6-digit password via on-screen keypad
@@ -66,7 +66,7 @@ Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_MOSI, TFT_SCLK, TFT_RS
 #define C_GAMEOVER         0x07E0   // bright green game-over text
 #define C_BTN_BG           0x0180   // dark green button bg
 #define C_BTN_HL           0x03E0   // mid green button highlight
-#define C_PB_EMPTY         0x0060   // dark progress bar empty
+#define C_PB_EMPTY         0x0140   // dark forest green — bar frame always visible
 #define C_PB_BORDER        0x03E0   // green progress bar border
 
 // Progress bar
@@ -156,27 +156,29 @@ uint32_t currentHash;
 // ─── Progress bar ───────────────────────────────────────────────────────────
 int8_t dispPct = -1;
 
-// Progress bar gradient — pure green ramp from dim to blazing bright
-// 96 entries, RGB565, dark green → mid green → bright #00FF00 → pale flash
+// Progress bar gradient — starts at visible dim-green, rises evenly to bright
+// No near-black at the base; all segments visible. 96 entries, RGB565.
+// Ramps from a soft forest green (0x0260) through to a steady bright green (0x05E0),
+// avoiding both the near-invisible start and the blinding white-wash top.
 const uint16_t PROGMEM pbGrad[96] = {
-  // 0-15: very dark → dark green
-  0x0020,0x0040,0x0060,0x0080,0x00A0,0x00C0,0x00E0,0x0100,
-  0x0120,0x0140,0x0160,0x0180,0x01A0,0x01C0,0x01E0,0x0200,
-  // 16-31: dark → medium green
-  0x0220,0x0240,0x0260,0x0280,0x02A0,0x02C0,0x02E0,0x0300,
-  0x0320,0x0340,0x0360,0x0380,0x03A0,0x03C0,0x03E0,0x03E0,
-  // 32-47: medium → bright green
-  0x03E0,0x04A0,0x0500,0x0520,0x0540,0x0560,0x0580,0x05A0,
-  0x05C0,0x05E0,0x0600,0x0620,0x0640,0x0660,0x0680,0x06A0,
-  // 48-63: approaching full bright
-  0x06C0,0x06E0,0x0700,0x0720,0x0740,0x0760,0x0780,0x07A0,
-  0x07C0,0x07E0,0x07E0,0x07E0,0x07E0,0x07E0,0x07E0,0x07E0,
-  // 64-79: bright green with white mixing (pale flash at top)
-  0x07E0,0x0FE2,0x17E4,0x1FE4,0x27E4,0x2FE4,0x37E4,0x3FE4,
-  0x47E4,0x4FE4,0x57E4,0x5FE4,0x67E6,0x6FE6,0x77E6,0x7FE6,
-  // 80-89: pale green → near white-green (top of bar is almost blinding)
-  0x87E6,0x8FE8,0x97E8,0x9FE8,0xA7E8,0xAFEA,0xB7EA,0xBFEA,
-  0xC7EC,0xCFEC,0xD7EC,0xDFEC,0xE7EE,0xEFEE,0xF7EE,0xFFEE,
+  // 0-15: soft dim green — always clearly visible on the display
+  0x0260,0x0280,0x02A0,0x02C0,0x02E0,0x0300,0x0320,0x0340,
+  0x0360,0x0380,0x03A0,0x03A0,0x03C0,0x03C0,0x03E0,0x03E0,
+  // 16-31: lower-mid green
+  0x03E0,0x03E0,0x04A0,0x04C0,0x04E0,0x04E0,0x0500,0x0500,
+  0x0520,0x0520,0x0540,0x0540,0x0560,0x0560,0x0580,0x0580,
+  // 32-47: mid green rising steadily
+  0x0580,0x05A0,0x05A0,0x05C0,0x05C0,0x05C0,0x05E0,0x05E0,
+  0x05E0,0x05E0,0x05E0,0x05E0,0x05E0,0x05E0,0x05E0,0x05E0,
+  // 48-63: hold at confident bright-mid green
+  0x05E0,0x05E0,0x05E0,0x05E0,0x05E0,0x05E0,0x05E0,0x05E0,
+  0x05E0,0x05E0,0x05E0,0x05E0,0x05E0,0x05E0,0x05E0,0x05E0,
+  // 64-79: ease up to full green
+  0x05E0,0x06A0,0x06C0,0x06E0,0x0700,0x0720,0x0740,0x0760,
+  0x0780,0x07A0,0x07C0,0x07C0,0x07E0,0x07E0,0x07E0,0x07E0,
+  // 80-95: settle at bright green — no white blow-out
+  0x07E0,0x07E0,0x07E0,0x07E0,0x07E0,0x07E0,0x07E0,0x07E0,
+  0x07E0,0x07E0,0x07E0,0x07E0,0x07E0,0x07E0,0x07E0,0x07E0,
 };
 
 // ─── UI state ───────────────────────────────────────────────────────────────
@@ -924,6 +926,549 @@ int seeMoveGain(int fromSq, int toSq, int piece, int attColor) {
   return capturedVal - opponentGain;
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// MEDUSA POSITIONAL INTELLIGENCE SYSTEM
+// ─────────────────────────────────────────────────────────────────────────────
+// Layers:
+//  1. Positional Genome Scanner  — multi-axis fingerprint of the position
+//  2. Gambit Signature Matcher   — detects known opening patterns, loads doctrine
+//  3. Thermodynamic Pawn Map     — heat/cold zones, identifies breaks
+//  4. Style Reactor              — 5-personality blend driven by genome
+//  5. Evaluation delta           — all above applied as additive score adjustments
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ─── Layer 1: Positional Genome ───────────────────────────────────────────────
+struct PositionalGenome {
+  int pawn_tension;       // number of direct pawn confrontations
+  int king_exposure;      // (black king attackers) - (white king attackers): >0 = black unsafe
+  int piece_activity;     // black mobility - white mobility (legal square count proxy)
+  int center_control;     // control of e4/d4/e5/d5: >0 = white dominates
+  int open_file_pressure; // open/semi-open files with our rooks vs theirs
+  int sacrifice_signal;   // material imbalance relative to initiative factors
+  int tempo_debt;         // undev white minors - undev black minors (>0 = white behind)
+};
+
+// Count squares a piece on `sq` can move to (fast mobility proxy, no legality check)
+static int mobilityProxy(int sq) {
+  int p = board[sq]; if(!p) return 0;
+  int r = rankOf(sq), f = fileOf(sq), mob = 0;
+  switch(TYPE(p)) {
+    case KNIGHT: {
+      const int kd[8][2]={{2,1},{2,-1},{-2,1},{-2,-1},{1,2},{1,-2},{-1,2},{-1,-2}};
+      for(auto& d : kd) if(inBounds(r+d[0],f+d[1])) mob++;
+      break;
+    }
+    case BISHOP: {
+      const int bd[4][2]={{1,1},{1,-1},{-1,1},{-1,-1}};
+      for(auto& d : bd) {
+        int rr=r+d[0], ff=f+d[1];
+        while(inBounds(rr,ff)) { mob++; if(board[sqOf(rr,ff)]) break; rr+=d[0]; ff+=d[1]; }
+      }
+      break;
+    }
+    case ROOK: {
+      const int rd[4][2]={{1,0},{-1,0},{0,1},{0,-1}};
+      for(auto& d : rd) {
+        int rr=r+d[0], ff=f+d[1];
+        while(inBounds(rr,ff)) { mob++; if(board[sqOf(rr,ff)]) break; rr+=d[0]; ff+=d[1]; }
+      }
+      break;
+    }
+    case QUEEN: {
+      const int qd[8][2]={{1,0},{-1,0},{0,1},{0,-1},{1,1},{1,-1},{-1,1},{-1,-1}};
+      for(auto& d : qd) {
+        int rr=r+d[0], ff=f+d[1];
+        while(inBounds(rr,ff)) { mob++; if(board[sqOf(rr,ff)]) break; rr+=d[0]; ff+=d[1]; }
+      }
+      break;
+    }
+    default: mob = 1; break;
+  }
+  return mob;
+}
+
+PositionalGenome computeGenome() {
+  PositionalGenome g = {0,0,0,0,0,0,0};
+
+  // Pawn tension: pairs of opposing pawns facing each other diagonally
+  for(int s=0;s<64;s++) {
+    if(board[s]==W_P) {
+      int r=rankOf(s), f=fileOf(s);
+      for(int df=-1;df<=1;df+=2) {
+        if(inBounds(r+1,f+df) && board[sqOf(r+1,f+df)]==B_P) g.pawn_tension++;
+      }
+    }
+  }
+
+  // King exposure: attacker count around each king
+  int wKsq=-1, bKsq=-1;
+  for(int s=0;s<64;s++) {
+    if(board[s]==W_K) wKsq=s;
+    if(board[s]==B_K) bKsq=s;
+  }
+  auto countKingAttackers = [&](int ksq, bool byWhite) -> int {
+    if(ksq<0) return 0;
+    int cnt=0;
+    int kr=rankOf(ksq), kf=fileOf(ksq);
+    for(int dr=-2;dr<=2;dr++) for(int df=-2;df<=2;df++) {
+      if(dr==0&&df==0) continue;
+      if(!inBounds(kr+dr,kf+df)) continue;
+      int p=board[sqOf(kr+dr,kf+df)];
+      if(p && (byWhite ? IS_WHITE(p) : IS_BLACK(p)) && TYPE(p)!=KING) cnt++;
+    }
+    return cnt;
+  };
+  g.king_exposure = countKingAttackers(bKsq,true) - countKingAttackers(wKsq,false);
+
+  // Piece activity: mobility differential (black - white, so positive = black more active)
+  int wMob=0, bMob=0;
+  for(int s=0;s<64;s++) {
+    if(!board[s]) continue;
+    int m=mobilityProxy(s);
+    if(IS_WHITE(board[s])) wMob+=m; else bMob+=m;
+  }
+  g.piece_activity = bMob - wMob;  // positive = black more active (bad for us as black)
+
+  // Center control: attacks on e4/d4/e5/d5 (white squares = sq 27,28,35,36)
+  // Positive = white dominates center
+  const int centerSqs[4] = {sqOf(3,3),sqOf(3,4),sqOf(4,3),sqOf(4,4)};
+  for(int cs : centerSqs) {
+    if(isSquareAttacked(cs,true))  g.center_control++;
+    if(isSquareAttacked(cs,false)) g.center_control--;
+    int p=board[cs];
+    if(p) {
+      if(IS_WHITE(p)) g.center_control++;
+      else            g.center_control--;
+    }
+  }
+
+  // Open file pressure
+  for(int f=0;f<8;f++) {
+    bool wp=false, bp=false, wr=false, br=false;
+    for(int r=0;r<8;r++) {
+      int p=board[sqOf(r,f)];
+      if(p==W_P) wp=true; if(p==B_P) bp=true;
+      if(p==W_R||p==W_Q) wr=true; if(p==B_R||p==B_Q) br=true;
+    }
+    if(!bp && wr) g.open_file_pressure++;   // black has open file with our rook
+    if(!wp && br) g.open_file_pressure--;   // white has open file with their rook
+  }
+
+  // Sacrifice signal: material imbalance — if we're up material significantly vs initiative
+  int wMat=0, bMat=0;
+  for(int s=0;s<64;s++) {
+    int p=board[s]; if(!p||TYPE(p)==KING) continue;
+    if(IS_WHITE(p)) wMat+=PIECE_VAL[TYPE(p)];
+    else            bMat+=PIECE_VAL[TYPE(p)];
+  }
+  g.sacrifice_signal = wMat - bMat;  // positive = white up material
+
+  // Tempo debt: undeveloped minor pieces (positive = white behind in development)
+  int wUndev=0, bUndev=0;
+  if(board[sqOf(0,1)]==W_N) wUndev++;
+  if(board[sqOf(0,6)]==W_N) wUndev++;
+  if(board[sqOf(0,2)]==W_B) wUndev++;
+  if(board[sqOf(0,5)]==W_B) wUndev++;
+  if(board[sqOf(7,1)]==B_N) bUndev++;
+  if(board[sqOf(7,6)]==B_N) bUndev++;
+  if(board[sqOf(7,2)]==B_B) bUndev++;
+  if(board[sqOf(7,5)]==B_B) bUndev++;
+  g.tempo_debt = wUndev - bUndev;
+
+  return g;
+}
+
+// ─── Layer 2: Gambit Signature Matcher ───────────────────────────────────────
+// Doctrine IDs — how the engine should respond to detected opening
+#define DOCTRINE_NONE         0
+#define DOCTRINE_NEUTRALIZE   1   // Solid response, no panic, consolidate
+#define DOCTRINE_SUBVERT      2   // Exploit tempo debt, punish premature attacks
+#define DOCTRINE_FORTRESS     3   // Lock down king safety, build pawn wall
+#define DOCTRINE_COUNTER_ATK  4   // Direct queenside/center counter-attack
+#define DOCTRINE_STRANGLE     5   // Space control, slow suffocation
+#define DOCTRINE_ACCEPT_GAMBIT 6  // Accept material, trade down to endgame
+
+struct GambitDoctrine {
+  int  id;
+  int  personality_strangler;   // 0-10 blend weight
+  int  personality_pyromaniac;
+  int  personality_fortress;
+  int  personality_subverter;
+  // Evaluation nudges (applied as score deltas for black)
+  int  center_break_bonus;      // bonus for d5/e5 breaks
+  int  king_safety_premium;     // extra weight on king shelter
+  int  piece_trade_bonus;       // bonus for trading pieces (simplify into endgame)
+  int  initiative_cancel_bonus; // bonus for moves that neutralize opponent tempo
+};
+
+// Detect what opening white is playing and return a doctrine
+GambitDoctrine detectAndLoadDoctrine() {
+  GambitDoctrine d;
+  d.id = DOCTRINE_NONE;
+  d.personality_strangler = 2;
+  d.personality_pyromaniac = 2;
+  d.personality_fortress = 2;
+  d.personality_subverter = 2;
+  d.center_break_bonus = 0;
+  d.king_safety_premium = 0;
+  d.piece_trade_bonus = 0;
+  d.initiative_cancel_bonus = 0;
+
+  if(historyCount < 2) return d;  // too early
+
+  // Board pattern shortcuts
+  bool wE4 = (board[sqOf(3,4)]==W_P);
+  bool wD4 = (board[sqOf(3,3)]==W_P);
+  bool wC4 = (board[sqOf(3,2)]==W_P);
+  bool wF4 = (board[sqOf(3,5)]==W_P);
+  bool bE5 = (board[sqOf(4,4)]==B_P);
+  bool bD5 = (board[sqOf(4,3)]==B_P);
+  bool bNf6= (board[sqOf(5,5)]==B_N);
+  bool bC6 = (board[sqOf(5,2)]==B_P);
+  bool wNf3= (board[sqOf(2,5)]==W_N);
+  bool wBc4= (board[sqOf(2,2)]==W_B);
+  bool wBf4= (board[sqOf(2,5)]==W_B);   // London bishop
+  bool wNd2= (board[sqOf(1,3)]==W_N);
+  bool wPf4= (board[sqOf(3,5)]==W_P);   // f4 push
+
+  // ── King's Gambit: 1.e4 e5 2.f4 ─────────────────────────────────────────
+  // White sacrifices f-pawn for rapid development and f-file attack.
+  // Counter-doctrine: Subverter+Pyromaniac — accept if safe, build counterplay,
+  // use the extra pawn to win the endgame.
+  if(wE4 && bE5 && wPf4) {
+    d.id = DOCTRINE_ACCEPT_GAMBIT;
+    d.personality_subverter   = 7;
+    d.personality_pyromaniac  = 5;
+    d.personality_fortress    = 4;
+    d.personality_strangler   = 1;
+    d.center_break_bonus      = 60;  // d5 counter-break is critical
+    d.king_safety_premium     = 40;  // king is exposed — shelter first
+    d.piece_trade_bonus       = 35;  // trade down — extra pawn wins ending
+    d.initiative_cancel_bonus = 50;  // cancel white's f-file initiative
+    return d;
+  }
+
+  // ── Queen's Gambit: 1.d4 d5 2.c4 ────────────────────────────────────────
+  // White pressures d5 pawn. Don't accept carelessly.
+  // Counter-doctrine: Strangler — hold d5, develop solidly, fight for center.
+  if(wD4 && bD5 && wC4) {
+    d.id = DOCTRINE_STRANGLE;
+    d.personality_strangler   = 8;
+    d.personality_subverter   = 4;
+    d.personality_fortress    = 3;
+    d.personality_pyromaniac  = 1;
+    d.center_break_bonus      = 50;  // c5 break is the thermal release valve
+    d.king_safety_premium     = 20;
+    d.piece_trade_bonus       = 20;
+    d.initiative_cancel_bonus = 30;
+    return d;
+  }
+
+  // ── London System: 1.d4 + Bf4/Nf3 + e3 pawn chain ───────────────────────
+  // White builds a solid boring structure. Fight for same space, create asymmetry.
+  // Counter-doctrine: Strangler — contest the c4 and e5 squares, avoid symmetry.
+  if(wD4 && wNf3 && wBf4) {
+    d.id = DOCTRINE_STRANGLE;
+    d.personality_strangler   = 9;
+    d.personality_subverter   = 3;
+    d.personality_fortress    = 2;
+    d.personality_pyromaniac  = 1;
+    d.center_break_bonus      = 45;  // e5 or c5 break creates asymmetry
+    d.king_safety_premium     = 15;
+    d.piece_trade_bonus       = -20; // avoid trades — London wants symmetry, we want life
+    d.initiative_cancel_bonus = 25;
+    return d;
+  }
+
+  // ── Italian Game / Giuoco Piano: 1.e4 e5 2.Nf3 Nc6 3.Bc4 ────────────────
+  // Slow buildup. Counter with d6/d5 central break.
+  if(wE4 && bE5 && wNf3 && wBc4) {
+    d.id = DOCTRINE_COUNTER_ATK;
+    d.personality_subverter   = 5;
+    d.personality_strangler   = 4;
+    d.personality_pyromaniac  = 3;
+    d.personality_fortress    = 3;
+    d.center_break_bonus      = 40;
+    d.king_safety_premium     = 20;
+    d.piece_trade_bonus       = 10;
+    d.initiative_cancel_bonus = 20;
+    return d;
+  }
+
+  // ── Scandinavian Defense mirror: if white pushes e4 and we played d5 ─────
+  // Black already challenged center. Continue pressure on d-file.
+  if(wE4 && bD5) {
+    d.id = DOCTRINE_COUNTER_ATK;
+    d.personality_pyromaniac  = 6;
+    d.personality_subverter   = 5;
+    d.personality_fortress    = 2;
+    d.personality_strangler   = 2;
+    d.center_break_bonus      = 55;
+    d.king_safety_premium     = 25;
+    d.piece_trade_bonus       = 15;
+    d.initiative_cancel_bonus = 35;
+    return d;
+  }
+
+  // ── English Opening: 1.c4 ────────────────────────────────────────────────
+  // Flank control without occupying center. Fight back through center directly.
+  if(wC4 && !wD4 && !wE4) {
+    d.id = DOCTRINE_COUNTER_ATK;
+    d.personality_strangler   = 5;
+    d.personality_subverter   = 5;
+    d.personality_pyromaniac  = 3;
+    d.personality_fortress    = 2;
+    d.center_break_bonus      = 50;
+    d.king_safety_premium     = 15;
+    d.piece_trade_bonus       = 10;
+    d.initiative_cancel_bonus = 20;
+    return d;
+  }
+
+  // ── Bird's Opening: 1.f4 ─────────────────────────────────────────────────
+  // White weakens kingside. Attack it directly with From's Gambit idea (e5).
+  if(wF4 && !wE4 && !wD4) {
+    d.id = DOCTRINE_COUNTER_ATK;
+    d.personality_pyromaniac  = 8;
+    d.personality_subverter   = 5;
+    d.personality_fortress    = 2;
+    d.personality_strangler   = 1;
+    d.center_break_bonus      = 65;  // e5 is the classic counter
+    d.king_safety_premium     = 10;
+    d.piece_trade_bonus       = 0;
+    d.initiative_cancel_bonus = 45;
+    return d;
+  }
+
+  // ── Default: solid, balanced ─────────────────────────────────────────────
+  d.id = DOCTRINE_NEUTRALIZE;
+  d.personality_strangler   = 3;
+  d.personality_subverter   = 3;
+  d.personality_fortress    = 3;
+  d.personality_pyromaniac  = 2;
+  d.center_break_bonus      = 20;
+  d.king_safety_premium     = 20;
+  d.piece_trade_bonus       = 0;
+  d.initiative_cancel_bonus = 15;
+  return d;
+}
+
+// ─── Layer 3: Thermodynamic Pawn Map ─────────────────────────────────────────
+// For each file, compute how "hot" (contested/breakthrough potential) it is.
+// Returns a heat value per file: positive = white pressure, negative = black pressure.
+// Used to steer evaluation toward the correct flank.
+void computePawnHeatMap(int heatMap[8]) {
+  for(int f=0;f<8;f++) heatMap[f]=0;
+
+  for(int s=0;s<64;s++) {
+    int p=board[s]; if(!p) continue;
+    if(TYPE(p)!=PAWN) continue;
+    int f=fileOf(s), r=rankOf(s);
+    if(IS_WHITE(p)) {
+      // Forward heat: rank advancement = more pressure upward
+      heatMap[f] += r * 2;
+      // Diagonal coverage
+      if(f>0) heatMap[f-1] += r;
+      if(f<7) heatMap[f+1] += r;
+    } else {
+      // Black pawn pushes downward
+      int br = 7 - r;
+      heatMap[f] -= br * 2;
+      if(f>0) heatMap[f-1] -= br;
+      if(f<7) heatMap[f+1] -= br;
+    }
+  }
+}
+
+// ─── Layer 4: Style Reactor ───────────────────────────────────────────────────
+// Given a genome and a doctrine, compute evaluation deltas for the position.
+// All deltas are from Black's perspective (positive = good for Black).
+int styleReactorDelta(const PositionalGenome& g, const GambitDoctrine& doc,
+                      int bKsq, int wKsq) {
+  int delta = 0;
+
+  // ── The Strangler ──────────────────────────────────────────────────────────
+  // Thrives when center control is being contested. Rewards space restriction.
+  {
+    int w = doc.personality_strangler;
+    if(w > 0) {
+      // Reward controlling center as black
+      delta += (-g.center_control) * w * 3;
+      // Reward having less pawn tension (locked = strangled)
+      if(g.pawn_tension <= 1) delta += w * 5;
+      // Reward open file pressure in our favor
+      if(g.open_file_pressure < 0) delta += (-g.open_file_pressure) * w * 2;
+    }
+  }
+
+  // ── The Pyromaniac ────────────────────────────────────────────────────────
+  // Loves open files, piece activity, sacrifices with compensation.
+  {
+    int w = doc.personality_pyromaniac;
+    if(w > 0) {
+      // Reward piece activity
+      if(g.piece_activity < 0) delta += (-g.piece_activity) * w * 2;
+      // Reward open file pressure
+      if(g.open_file_pressure < 0) delta += (-g.open_file_pressure) * w * 3;
+      // Slight bonus for pawn tension (creates open lines)
+      delta += g.pawn_tension * w;
+    }
+  }
+
+  // ── The Fortress ──────────────────────────────────────────────────────────
+  // Activates when the black king is at risk. Locks down the position.
+  {
+    int w = doc.personality_fortress;
+    if(w > 0 && bKsq >= 0) {
+      // If black king is exposed (many white attackers near king)
+      if(g.king_exposure > 2) {
+        delta -= g.king_exposure * w * 8;  // heavily penalize king exposure
+      }
+      // Reward king safety premium from doctrine
+      delta += doc.king_safety_premium * w / 3;
+    }
+  }
+
+  // ── The Subverter ─────────────────────────────────────────────────────────
+  // Exploits white's tempo debt (undeveloped pieces).
+  {
+    int w = doc.personality_subverter;
+    if(w > 0) {
+      // If white is behind in development (positive tempo_debt = white behind)
+      if(g.tempo_debt > 0) delta += g.tempo_debt * w * 10;
+      // Reward initiative cancellation
+      delta += doc.initiative_cancel_bonus * w / 5;
+    }
+  }
+
+  // ── Doctrine-specific bonuses ─────────────────────────────────────────────
+  // Piece trade bonus (simplified endgame)
+  if(doc.piece_trade_bonus != 0) {
+    // Count pieces traded (fewer pieces = more applicable)
+    int totalPieces = 0;
+    for(int s=0;s<64;s++) {
+      if(board[s] && TYPE(board[s])!=KING && TYPE(board[s])!=PAWN) totalPieces++;
+    }
+    // Bonus scales: fewer pieces = more relevant (endgame approaching)
+    int tradeRelevance = max(0, 14 - totalPieces);
+    delta += doc.piece_trade_bonus * tradeRelevance / 5;
+  }
+
+  return delta;
+}
+
+// ─── Layer 5: Thermodynamic Break Bonus ──────────────────────────────────────
+// Reward black for controlling the "thermal release valve" — the break square
+// identified by the pawn heat map. Applied inside evaluate().
+int thermodynamicBreakBonus(const GambitDoctrine& doc, const int heatMap[8]) {
+  int bonus = 0;
+  if(doc.center_break_bonus <= 0) return 0;
+
+  // Find the hottest contested file (where white has heat pressure)
+  // The "thermal release valve" for black is breaking on that file or adjacent
+  int hottestFile = 3;  // default to d-file
+  int hottestHeat = -9999;
+  for(int f=2;f<=5;f++) {  // only center files
+    if(heatMap[f] > hottestHeat) { hottestHeat = heatMap[f]; hottestFile = f; }
+  }
+
+  // Check if black has a pawn that can break on the hottest file or adjacent
+  for(int df=-1;df<=1;df++) {
+    int tf = hottestFile + df;
+    if(tf<0||tf>7) continue;
+    for(int r=3;r<=5;r++) {
+      if(board[sqOf(r,tf)]==B_P) {
+        // Pawn in position to create tension on the hot file
+        bonus += doc.center_break_bonus;
+        break;
+      }
+    }
+  }
+
+  // Extra reward if we've already executed the break (pawn on rank 4 in center)
+  for(int f=2;f<=5;f++) {
+    if(board[sqOf(3,f)]==B_P) bonus += doc.center_break_bonus / 2;
+  }
+
+  return bonus;
+}
+
+// ─── Master PIS integration function ─────────────────────────────────────────
+// Called from evaluate(). Returns total delta to add to score (black perspective).
+int positionalIntelligenceDelta() {
+  if(!isOpeningPhase()) return 0;  // only fires in opening/early middlegame
+
+  PositionalGenome genome = computeGenome();
+  GambitDoctrine doctrine = detectAndLoadDoctrine();
+
+  int bKsq=-1, wKsq=-1;
+  for(int s=0;s<64;s++) {
+    if(board[s]==W_K) wKsq=s;
+    if(board[s]==B_K) bKsq=s;
+  }
+
+  int heatMap[8];
+  computePawnHeatMap(heatMap);
+
+  int delta = 0;
+  delta += styleReactorDelta(genome, doctrine, bKsq, wKsq);
+  delta += thermodynamicBreakBonus(doctrine, heatMap);
+
+  // Clamp to prevent runaway evaluation swings
+  if(delta >  250) delta =  250;
+  if(delta < -250) delta = -250;
+
+  return delta;
+}
+
+// ─── PIS move ordering bonus ─────────────────────────────────────────────────
+// Called from moveScore() for black moves in opening. Returns extra score.
+int pisMoveBonus(Move& m) {
+  if(!isOpeningPhase()) return 0;
+  if(!IS_BLACK(board[m.from])) return 0;
+
+  GambitDoctrine doc = detectAndLoadDoctrine();
+  if(doc.id == DOCTRINE_NONE) return 0;
+
+  int bonus = 0;
+  int toR = rankOf(m.to), toF = fileOf(m.to);
+  int piece = board[m.from];
+
+  // Center break bonus: prioritize pawns advancing to break squares
+  if(TYPE(piece) == PAWN) {
+    bool isCenterFile = (toF >= 2 && toF <= 5);
+    bool isBreakRank  = (toR >= 3 && toR <= 4);
+    if(isCenterFile && isBreakRank) bonus += doc.center_break_bonus;
+
+    // King's Gambit: d5 counter is the #1 priority response
+    if(doc.id == DOCTRINE_ACCEPT_GAMBIT && toF == 3 && toR == 4) bonus += 150;
+    // Queen's Gambit: c5 break is the release valve
+    if(doc.id == DOCTRINE_STRANGLE && toF == 2 && toR == 4) bonus += 120;
+    // Bird's counter: e5 push
+    if(doc.id == DOCTRINE_COUNTER_ATK && toF == 4 && toR == 4) bonus += 130;
+  }
+
+  // Subverter: moves that exploit white's undeveloped pieces get a boost
+  if(doc.personality_subverter >= 5 && TYPE(piece) == KNIGHT) {
+    // Knight to outpost squares (e4, d4 area — rank 3 for black = rank index 3)
+    if(toR == 3 && toF >= 2 && toF <= 5) bonus += doc.initiative_cancel_bonus;
+  }
+
+  // Fortress: if doctrine calls for king safety, boost castling heavily
+  if(doc.personality_fortress >= 4 && m.flags == 2) bonus += 200;
+
+  // Accept Gambit doctrine: trade pieces to simplify
+  if(doc.id == DOCTRINE_ACCEPT_GAMBIT && board[m.to] != EMPTY) {
+    bonus += doc.piece_trade_bonus;
+  }
+
+  return bonus;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// END MEDUSA POSITIONAL INTELLIGENCE SYSTEM
+// ═══════════════════════════════════════════════════════════════════════════════
+
 // ─── Evaluation ───────────────────────────────────────────────────────────────
 int evaluate() {
   int score = 0;
@@ -1162,8 +1707,6 @@ int evaluate() {
     }
   }
 
-// put function declarations here:
-int myFunction(int, int);
   // ── Backward pawn penalty ─────────────────────────────────────────────────
   // A pawn that can't be supported by other pawns and is behind its neighbors
   // creates a hole on the square in front of it (Issue 4)
@@ -1230,6 +1773,10 @@ int myFunction(int, int);
       else if(!bPawn && wPawn) score -= 10;
     }
   }
+
+  // ── Medusa Positional Intelligence System delta ───────────────────────────
+  // Subtracts from score (evaluate is white-relative; PIS delta is black-relative)
+  score -= positionalIntelligenceDelta();
 
   return score;
 }
@@ -1416,6 +1963,9 @@ int moveScore(Move& m) {
   }
   if((TYPE(piece)==KNIGHT||TYPE(piece)==BISHOP)&&m.to==lastBlackFrom&&cap==EMPTY)
     s -= 220;
+
+  // Medusa PIS move ordering bonus
+  s += pisMoveBonus(m);
 
   return s;
 }
@@ -2017,14 +2567,15 @@ void drawPhaseIndicator() {
 // x,y = top-left corner of the icon area (fits in 13x34 panel space)
 void drawFlagIcon(int bx, int by) {
   tft.fillRoundRect(bx, by, 13, 34, 2, C_BTN_BG);
-  
+
   int poleX = bx + 4;
   int poleTop = by + 4;
   int poleBot = by + 29;
-  tft.drawFastVLine(poleX,   poleTop, poleBot - poleTop + 1, 0x03E0);  // bright green pole
-  tft.drawFastVLine(poleX+1, poleTop, poleBot - poleTop + 1, 0x0180);  // dark shadow
+  // Pole stays neutral — a slim gray-green so it doesn't clash with the red flag
+  tft.drawFastVLine(poleX,   poleTop, poleBot - poleTop + 1, 0x0300);
+  tft.drawFastVLine(poleX+1, poleTop, poleBot - poleTop + 1, 0x0180);
 
-  // Bright green triangular flag
+  // Red triangular flag — bright red highlight on top edge, dark red shadow on diagonal
   int flagStartY = poleTop;
   int flagH = 11;
   for(int row = 0; row < flagH; row++) {
@@ -2033,13 +2584,15 @@ void drawFlagIcon(int bx, int by) {
     for(int px = 0; px < w; px++) {
       int fx = poleX + 2 + px;
       if(fx < bx + 13) {
-        uint16_t c = (row == 0) ? 0x47E4 : (px == w-1) ? 0x03E0 : 0x07E0;
+        // Top edge: bright highlight. Trailing edge: dark shadow. Fill: mid red.
+        uint16_t c = (row == 0) ? 0xFBA0 : (px == w-1) ? 0x8000 : 0xD000;
         tft.drawPixel(fx, rowY, c);
       }
     }
   }
 
-  tft.drawFastHLine(poleX - 1, poleBot + 1, 4, 0x0300);
+  // Base foot — dim green shadow line (pole rests on the ground)
+  tft.drawFastHLine(poleX - 1, poleBot + 1, 4, 0x0180);
 }
 
 void drawLeftPanel() {
@@ -2059,9 +2612,9 @@ void drawLeftPanel() {
     tft.drawFastVLine(12,50, 34, 0x03A0);
   }
   tft.setTextSize(1);
-  tft.setTextColor(0x07E0); tft.setCursor(4, 54); tft.print('U');
-  tft.setTextColor(0x03E0); tft.setCursor(4, 63); tft.print('N');
-  tft.setTextColor(0x0300); tft.setCursor(4, 72); tft.print('D');
+  tft.setTextColor(0x03E0); tft.setCursor(4, 54); tft.print('U');
+  tft.setTextColor(0x03A0); tft.setCursor(4, 63); tft.print('N');
+  tft.setTextColor(0x0360); tft.setCursor(4, 72); tft.print('D');
 
   tft.drawFastVLine(13, 4, 104, 0x03A0);
 }
@@ -2123,7 +2676,7 @@ void drawGameOver() {
   int len = strlen(gameOverMsg);
   int tw  = len * 6;
   int tx  = 22 + (104 - tw) / 2;
-  const uint16_t brc[8] = {0x07E0,0x47E4,0x03E0,0x07E0,0x47E4,0x03E0,0x07E0,0x47E4};
+  const uint16_t brc[8] = {0x03E0,0x05E0,0x03E0,0x05E0,0x03E0,0x05E0,0x03E0,0x05E0};
   for(int i=0; i<len; i++) {
     tft.setTextColor(brc[i % 8]);
     tft.setCursor(tx + i*6, 120);
@@ -2631,8 +3184,8 @@ void showResignScreen() {
     int l = strlen(t1);
     int x0 = (160 - l*6) / 2;
     const uint16_t grad[12] = {
-      0x03E0,0x07E0,0x47E4,0xFFFF,0x47E4,0x07E0,
-      0x03E0,0x07E0,0x47E4,0xFFFF,0x47E4,0x07E0
+      0x03E0,0x05E0,0x03E0,0x05E0,0x03E0,0x05E0,
+      0x03E0,0x05E0,0x03E0,0x05E0,0x03E0,0x05E0
     };
     for(int i = 0; i < l; i++) {
       tft.setTextColor(grad[i % 12]);
@@ -2696,28 +3249,29 @@ void showCheckmateScreen() {
     }
   }
 
-  // Top accent bar — dim red (you lost — danger)
-  tft.fillRect(0, 0, 160, 3, 0xF800);
-  tft.fillRect(0, 3, 160, 1, 0x8000);
+  // Top accent bar — dual stripe: red + green
+  tft.fillRect(0, 0, 160, 2, 0xD000);
+  tft.fillRect(0, 2, 160, 1, 0x03E0);
+  tft.fillRect(0, 3, 160, 1, 0x0180);
 
-  // Fallen king — red crown (defeated)
+  // Fallen king — body in dark red, crown tip in mid red
   int cx = 80, cy = 28;
   tft.fillRect(cx-10, cy+4, 20, 6, 0x8000);
   tft.fillRect(cx-10, cy, 3, 5, 0x8000);
-  tft.fillRect(cx-2,  cy-2, 5, 7, 0xF800);
+  tft.fillRect(cx-2,  cy-2, 5, 7, 0xD000);
   tft.fillRect(cx+7,  cy, 3, 5, 0x8000);
-  tft.fillRect(cx-2,  cy-6, 5, 5, 0xF800);
-  tft.fillRect(cx-5,  cy-3, 11, 2, 0xF800);
+  tft.fillRect(cx-2,  cy-6, 5, 5, 0xD000);
+  tft.fillRect(cx-5,  cy-3, 11, 2, 0xD000);
   tft.drawFastHLine(cx-14, cy+10, 28, 0x4000);
   tft.fillRect(cx-14, cy+11, 28, 2, 0x2000);
 
-  // "YOU LOST" — alternating red pulses
+  // "YOU LOST" — shades of red
   {
     tft.setTextSize(2);
     const char* t1 = "YOU LOST";
     int tlen = strlen(t1);
     int tx0 = (160 - tlen*12)/2;
-    const uint16_t tgrad[8] = {0xF800,0xF800,0xA000,0xF800,0xF800,0xA000,0xF800,0xA000};
+    const uint16_t tgrad[8] = {0xF800,0xD000,0xF800,0xA800,0xF800,0xD000,0xF800,0xA800};
     for(int i = 0; i < tlen; i++) {
       tft.setTextColor(tgrad[i % 8]);
       tft.setCursor(tx0 + i*12, 48);
@@ -2725,9 +3279,11 @@ void showCheckmateScreen() {
     }
   }
 
-  tft.drawFastHLine(20, 68, 120, 0x8000);
+  // Divider — half red, half green
+  tft.drawFastHLine(20,  68, 60, 0x8000);
+  tft.drawFastHLine(80,  68, 60, 0x0300);
 
-  // "CHECKMATE" — dim green (the machine speaks)
+  // "CHECKMATE" — mid green (the machine speaks)
   {
     const char* go = "CHECKMATE";
     int gl = strlen(go);
@@ -2740,17 +3296,19 @@ void showCheckmateScreen() {
   {
     const char* yl = "Black wins.";
     int yll = strlen(yl);
-    tft.setTextColor(0x07E0);
+    tft.setTextColor(0x05E0);
     tft.setCursor((160 - yll*6) / 2, 85);
     tft.print(yl);
   }
 
-  // Bottom bar
-  tft.fillRect(0, 108, 160, 1, 0x8000);
-  tft.fillRect(0, 109, 160, 19, 0x0800);
+  // Bottom bar — left half red, right half green
+  tft.fillRect(0,   108, 80, 1, 0x8000);
+  tft.fillRect(80,  108, 80, 1, 0x03A0);
+  tft.fillRect(0,   109, 80, 19, 0x1800);
+  tft.fillRect(80,  109, 80, 19, 0x0060);
 
-  // Piece row — red accents
-  const uint16_t pieceCol[6] = {0xF800,0xA000,0xF800,0xA000,0xF800,0xA000};
+  // Piece row — red on left side, green on right side
+  const uint16_t pieceCol[6] = {0xF800,0xD000,0xA800,0x03E0,0x05E0,0x03A0};
   const char pieceChars2[6] = {'K','Q','R','B','N','P'};
   for(int i = 0; i < 6; i++) {
     tft.setTextColor(pieceCol[i]);
@@ -2758,7 +3316,9 @@ void showCheckmateScreen() {
     tft.print(pieceChars2[i]);
   }
 
-  tft.drawFastHLine(0, 127, 160, 0xF800);
+  // Bottom edge — split accent
+  tft.drawFastHLine(0,  127, 80, 0xD000);
+  tft.drawFastHLine(80, 127, 80, 0x07E0);
 
   delay(1500);
 }
@@ -2985,7 +3545,7 @@ void playIntroCutscene() {
     int tlen = strlen(title);
     int tx0 = (160 - tlen*12)/2;
     // Shimmer: dim→bright→pale
-    const uint16_t tgrad[8] = {0x03E0,0x07E0,0x47E4,0xFFFF,0x47E4,0x07E0,0x03E0,0x07E0};
+    const uint16_t tgrad[8] = {0x03E0,0x05E0,0x03A0,0x05E0,0x03E0,0x05E0,0x03A0,0x03E0};
     for(int i = 0; i < tlen; i++) {
       tft.setTextColor(tgrad[i % 8]);
       tft.setCursor(tx0 + i*12, 8);
@@ -3041,7 +3601,7 @@ void playIntroCutscene() {
   };
   int versionCount = 8;
 
-  scrollNameAnimation(55, 61, 97, 14, versionNames, versionCount, "Alpha", 0x47E4);
+  scrollNameAnimation(55, 61, 97, 14, versionNames, versionCount, "Beta", 0x47E4);
 
   // ── Final locked display ──────────────────────────────────────
   delay(150);
@@ -3054,35 +3614,25 @@ void playIntroCutscene() {
   tft.fillRect(0, 82, 160, 1, 0x03E0);
   tft.fillRect(0, 83, 160, 28, 0x0020);
 
-  // "Medusa | Alpha" in one bright line
+  // "Medusa | Beta" centered in summary band
   tft.setTextSize(1);
   tft.setTextColor(0x07E0);
-  tft.setCursor(20, 88);
+  tft.setCursor(36, 90);
   tft.print("Medusa");
   tft.setTextColor(0x03A0);
-  tft.setCursor(64, 88);
+  tft.setCursor(80, 90);
   tft.print("|");
   tft.setTextColor(0x47E4);
-  tft.setCursor(72, 88);
-  tft.print("Alpha");
-
-  // Tiny "by Richard" credit
-  tft.setTextColor(0x0300);
-  tft.setCursor(112, 88);
-  tft.print("by Richard");
+  tft.setCursor(88, 90);
+  tft.print("Beta");
 
   // Thin rule
-  tft.drawFastHLine(10, 98, 140, 0x03A0);
+  tft.drawFastHLine(10, 101, 140, 0x03A0);
 
-  // Bottom prompt — blinking-style with two states baked in
+  // Bottom prompt
   tft.setTextColor(0x07E0);
-  tft.setCursor(28, 103);
+  tft.setCursor(28, 108);
   tft.print("> press to begin <");
-
-  // Tiny model tag at very bottom
-  tft.setTextColor(0x0300);
-  tft.setCursor(50, 116);
-  tft.print("v4.6 // ESP32");
 
   // Bottom edge accent
   tft.drawFastHLine(0, 127, 160, 0x03E0);
