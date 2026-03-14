@@ -1439,9 +1439,8 @@ int pisMoveBonus(Move& m) {
   // where it can be won immediately (e.g. pawn takes, net material loss), heavily
   // penalise the move. This catches the bishop-for-pawn blunder regardless of
   // whether it's a pawn kick, a knight fork, or any other attacker.
-  if((TYPE(piece) == KNIGHT || TYPE(piece) == BISHOP) && cap == EMPTY) {
+  if((TYPE(piece) == KNIGHT || TYPE(piece) == BISHOP) && board[m.to] == EMPTY) {
     // Simulate the piece landing, then evaluate SEE on that square from white's view
-    int pieceVal = PIECE_VAL[TYPE(piece)];
     int netLoss = seeCaptures(m.to, 1);  // how much white can gain by capturing here
     // netLoss > 0 means white wins material by capturing our piece on m.to
     if(netLoss > 0) {
