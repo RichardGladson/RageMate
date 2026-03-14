@@ -156,24 +156,26 @@ uint32_t currentHash;
 // ─── Progress bar ───────────────────────────────────────────────────────────
 int8_t dispPct = -1;
 
-// Progress bar: segmented block design.
-// The bar is divided into 12 equal segments (8px each = 96px total).
-// Empty segments show as dark green outlines, filled segments are solid green.
-// Brightness increases toward the top: bottom = dim, top = bright.
-// This avoids the invisible near-black bottom problem entirely.
-const uint16_t PROGMEM pbSegColors[12] = {
-  0x0180,  // seg 0  (bottom)  — darkest green fill
-  0x0200,
-  0x0280,
-  0x0300,
-  0x03A0,
-  0x03E0,
-  0x03E0,
-  0x05E0,
-  0x05E0,
-  0x07E0,
-  0x07E0,
-  0x07E0,  // seg 11 (top)    — brightest green fill
+// Progress bar gradient: solid fill, bottom→top.
+// Starts at a VISIBLE dark green (not black) so the bottom is always readable.
+// Gentler ramp: dark green → medium → bright — no near-black at bottom.
+const uint16_t PROGMEM pbGrad[96] = {
+  // 0-23: dark green (always visible even at low pct)
+  0x0180,0x0180,0x01A0,0x01C0,0x01E0,0x0200,0x0220,0x0240,
+  0x0260,0x0280,0x02A0,0x02C0,0x02E0,0x0300,0x0300,0x0320,
+  0x0340,0x0360,0x0380,0x03A0,0x03A0,0x03C0,0x03C0,0x03E0,
+  // 24-47: medium → bright green
+  0x03E0,0x03E0,0x03E0,0x04A0,0x04C0,0x04E0,0x0500,0x0520,
+  0x0540,0x0560,0x0580,0x05A0,0x05C0,0x05E0,0x05E0,0x0600,
+  0x0620,0x0640,0x0660,0x0680,0x06A0,0x06C0,0x06E0,0x06E0,
+  // 48-71: bright → full bright
+  0x0700,0x0720,0x0740,0x0760,0x0780,0x07A0,0x07C0,0x07C0,
+  0x07E0,0x07E0,0x07E0,0x07E0,0x07E0,0x07E0,0x07E0,0x07E0,
+  0x07E0,0x07E0,0x07E0,0x07E0,0x07E0,0x07E0,0x07E0,0x07E0,
+  // 72-95: bright green with gentle pale wash (no blinding white)
+  0x07E0,0x0FE2,0x17E4,0x1FE4,0x27E4,0x27E4,0x2FE4,0x37E4,
+  0x3FE4,0x47E4,0x47E4,0x4FE4,0x57E4,0x57E4,0x5FE4,0x5FE4,
+  0x67E6,0x67E6,0x6FE6,0x77E6,0x77E6,0x7FE6,0x87E6,0x8FE8,
 };
 
 // ─── UI state ───────────────────────────────────────────────────────────────
@@ -213,32 +215,26 @@ const int8_t PST_PAWN[64] PROGMEM = {
   -5, -5, -8,-15,-15, -8, -5, -5,
    0,  0,  0,  0,  0,  0,  0,  0
 };
-// Knight PST: prefer squares that are either protected by own pawns or
-// not easily kicked by advancing enemy pawns. The raw center (d4/e4/d5/e5)
-// is slightly less attractive than squares with pawn protection (c3/f3/c6/f6).
-// d4/e5 squares give a shorter bonus — the kick-proof evaluation layer adds
-// the context-sensitive adjustment at runtime.
+// Knight PST: slightly lower center peak vs original to avoid kick-zone magnetism,
+// but still strongly prefers center outposts over rim.
 const int8_t PST_KNIGHT[64] PROGMEM = {
   -50,-40,-30,-30,-30,-30,-40,-50,
-  -40,-20,  0,  2,  2,  0,-20,-40,
-  -30,  2, 10, 12, 12, 10,  2,-30,
-  -30,  4, 12, 14, 14, 12,  4,-30,
-  -30,  4, 12, 14, 14, 12,  4,-30,
-  -30,  4, 10, 12, 12, 10,  4,-30,
+  -40,-20,  0,  0,  0,  0,-20,-40,
+  -30,  0,  8, 12, 12,  8,  0,-30,
+  -30,  4, 12, 16, 16, 12,  4,-30,
+  -30,  0, 12, 16, 16, 12,  0,-30,
+  -30,  4,  8, 12, 12,  8,  4,-30,
   -40,-20,  0,  4,  4,  0,-20,-40,
   -50,-40,-30,-30,-30,-30,-40,-50
 };
-// Bishop PST: long diagonals preferred but not so strongly central that
-// the bishop rushes to squares like c4/b5 where it can be kicked by b4/a4/c3.
-// The kick-proof evaluation layer handles the dynamic penalty at runtime.
 const int8_t PST_BISHOP[64] PROGMEM = {
   -20,-10,-10,-10,-10,-10,-10,-20,
   -10,  0,  0,  0,  0,  0,  0,-10,
-  -10,  0,  6,  8,  8,  6,  0,-10,
-  -10,  4,  6,  8,  8,  6,  4,-10,
-  -10,  0,  8,  8,  8,  8,  0,-10,
-  -10,  6,  8,  8,  8,  8,  6,-10,
-  -10,  4,  0,  0,  0,  0,  4,-10,
+  -10,  0,  5, 10, 10,  5,  0,-10,
+  -10,  5,  5, 10, 10,  5,  5,-10,
+  -10,  0, 10, 10, 10, 10,  0,-10,
+  -10, 10, 10, 10, 10, 10, 10,-10,
+  -10,  5,  0,  0,  0,  0,  5,-10,
   -20,-10,-10,-10,-10,-10,-10,-20
 };
 const int8_t PST_ROOK[64] PROGMEM = {
@@ -1037,7 +1033,6 @@ int evaluate() {
 
     if(opening) {
       // ── Undeveloped minor piece penalty ────────────────────────────────────
-      // Penalize side that leaves knights/bishops on starting squares
       if(board[sqOf(7,1)]==B_N) score += 30;
       if(board[sqOf(7,6)]==B_N) score += 30;
       if(board[sqOf(7,2)]==B_B) score += 25;
@@ -1047,41 +1042,48 @@ int evaluate() {
       if(board[sqOf(0,2)]==W_B) score -= 25;
       if(board[sqOf(0,5)]==W_B) score -= 25;
 
-      // ── Castling rights: REWARD still having the option, penalize losing it ─
-      // (fixed: was inverted for Black — having rights is GOOD, losing them is BAD)
-      if(!(bCastle_K||bCastle_Q)) score += 30;  // Black lost castling rights → good for White
-      if(!(wCastle_K||wCastle_Q)) score -= 30;  // White lost castling rights → good for Black
-      // Bonus for still having rights (incentivizes preserving the option)
-      if(bCastle_K||bCastle_Q) score -= 10;     // Black still has rights → slight bonus for Black
-      if(wCastle_K||wCastle_Q) score += 10;     // White still has rights → slight bonus for White
+      // ── Castling rights: penalty for having LOST rights, no double-counting ─
+      if(!(bCastle_K||bCastle_Q)) score += 25;   // Black lost castling → White benefit
+      if(!(wCastle_K||wCastle_Q)) score -= 25;   // White lost castling → Black benefit
 
-      // ── Early queen development penalty ────────────────────────────────────
-      // If queen left starting square while 2+ minor pieces are still home,
-      // it's a premature queen sally — penalize it heavily (Issue 3)
+      // ── Early queen penalty: only when truly premature ──────────────────────
+      // Don't fire on forced recaptures: if the queen is on d-file rank 3-5 and
+      // a minor piece was just traded, that's often necessary (Sicilian Qxd4 etc).
+      // Only penalize if the queen is on a clearly non-central outpost square
+      // (b3/b6, c3/c6, a4/a5 etc.) AND 2+ minors are still home.
       {
         int wMinorsHome = 0;
         if(board[sqOf(0,1)]==W_N) wMinorsHome++;
         if(board[sqOf(0,6)]==W_N) wMinorsHome++;
         if(board[sqOf(0,2)]==W_B) wMinorsHome++;
         if(board[sqOf(0,5)]==W_B) wMinorsHome++;
-        // If White queen has left d1 while >=2 minors are still home → penalize
-        if(board[sqOf(0,3)]!=W_Q && wMinorsHome >= 2) score -= 40;
+        if(board[sqOf(0,3)]!=W_Q && wMinorsHome >= 2) {
+          // Only penalize if queen is on a wing square (file 0-1 or 5-7)
+          // where it's clearly a sally, not a central recapture
+          for(int s=0;s<64;s++) {
+            if(board[s]==W_Q) {
+              int qf = fileOf(s);
+              if(qf <= 1 || qf >= 5) score -= 35;
+              break;
+            }
+          }
+        }
 
         int bMinorsHome2 = 0;
         if(board[sqOf(7,1)]==B_N) bMinorsHome2++;
         if(board[sqOf(7,6)]==B_N) bMinorsHome2++;
         if(board[sqOf(7,2)]==B_B) bMinorsHome2++;
         if(board[sqOf(7,5)]==B_B) bMinorsHome2++;
-        // If Black queen has left d8 while >=2 minors are still home → penalize Black
-        // (fixed: was rewarding Black for this, now correctly penalizes it — Issue 3)
-        if(board[sqOf(7,3)]!=B_Q && bMinorsHome2 >= 2) score += 40;
+        if(board[sqOf(7,3)]!=B_Q && bMinorsHome2 >= 2) {
+          for(int s=0;s<64;s++) {
+            if(board[s]==B_Q) {
+              int qf = fileOf(s);
+              if(qf <= 1 || qf >= 5) score += 35;
+              break;
+            }
+          }
+        }
       }
-
-      // ── Piece-under-pawn-attack tempo penalty ───────────────────────────────
-      // A bishop/knight on a square attacked by an enemy pawn loses tempo when
-      // kicked — this already exists as the pawn-threat block below, but add
-      // an extra opening-specific sting to mirror "c3 hits the Bb4" (Issue 1)
-      // (handled more heavily in combined pass below — see pawnthreat += 30 → 40)
     }
 
     int brPos[2]; int brc=0;
@@ -1126,61 +1128,53 @@ int evaluate() {
       }
       if(tp == KNIGHT || tp == BISHOP) {
         int r = rankOf(s), f = fileOf(s);
-        // Extra sting in opening: being kicked by a pawn loses a full tempo
-        int threatPenalty = opening ? 45 : 30;
+        int threatPenalty = opening ? 40 : 25;
         if(IS_BLACK(p)) {
-          // Immediate pawn threat (pawn already attacking this square)
-          bool pawnthreat = false;
+          // Tier 1: pawn is already attacking this square (immediate threat)
+          bool attacked = false;
           for(int df = -1; df <= 1; df += 2) {
             int pr = r - 1, pf = f + df;
-            if(inBounds(pr, pf) && board[sqOf(pr, pf)] == W_P) { pawnthreat = true; break; }
+            if(inBounds(pr, pf) && board[sqOf(pr, pf)] == W_P) { attacked = true; break; }
           }
-          if(pawnthreat) score += threatPenalty;
+          if(attacked) score += threatPenalty;
 
-          // ── Proactive kick-proof: penalize squares a W_P can advance to attack ─
-          // A white pawn 1 or 2 squares below on an adjacent file can kick this piece.
-          // Only penalize in opening, only for squares that aren't intrinsically safe.
-          if(opening) {
-            bool canBeKickedSoon = false;
+          // Tier 2 (opening only): pawn can advance ONE step to attack this square.
+          // Only penalizes when path is clear and the pawn is NOT itself attacked,
+          // so we don't penalise against over-extended enemy pawns.
+          else if(opening) {
             for(int df = -1; df <= 1; df += 2) {
               int af = f + df;
               if(af < 0 || af > 7) continue;
-              // Pawn 1 rank below that could push 1 step and attack
-              if(inBounds(r-2, af) && board[sqOf(r-2, af)] == W_P
-                 && board[sqOf(r-1, af)] == EMPTY) { canBeKickedSoon = true; break; }
-              // Pawn 2 ranks below that could push 2 steps (from rank 1) and attack
-              if(inBounds(r-3, af) && board[sqOf(r-3, af)] == W_P
-                 && rankOf(sqOf(r-3,af)) == 1   // only pawn on starting rank can double-push
-                 && board[sqOf(r-2, af)] == EMPTY
-                 && board[sqOf(r-1, af)] == EMPTY) { canBeKickedSoon = true; break; }
+              int kickRank = r - 2;   // pawn would be here before advancing to r-1
+              if(!inBounds(kickRank, af)) continue;
+              if(board[sqOf(kickRank, af)] == W_P &&
+                 board[sqOf(r-1,     af)] == EMPTY) {
+                score += 15;  // softer: just a nudge, not the full penalty
+                break;
+              }
             }
-            // Exempt Black pieces on back-rank zones (ranks 6–7) where they are safe from this
-            if(canBeKickedSoon && r <= 5) score += 18;
           }
         } else {
-          // Immediate pawn threat
-          bool pawnthreat = false;
+          // White piece
+          bool attacked = false;
           for(int df = -1; df <= 1; df += 2) {
             int pr = r + 1, pf = f + df;
-            if(inBounds(pr, pf) && board[sqOf(pr, pf)] == B_P) { pawnthreat = true; break; }
+            if(inBounds(pr, pf) && board[sqOf(pr, pf)] == B_P) { attacked = true; break; }
           }
-          if(pawnthreat) score -= threatPenalty;
+          if(attacked) score -= threatPenalty;
 
-          // ── Proactive kick-proof for White pieces ─────────────────────────────
-          if(opening) {
-            bool canBeKickedSoon = false;
+          else if(opening) {
             for(int df = -1; df <= 1; df += 2) {
               int af = f + df;
               if(af < 0 || af > 7) continue;
-              if(inBounds(r+2, af) && board[sqOf(r+2, af)] == B_P
-                 && board[sqOf(r+1, af)] == EMPTY) { canBeKickedSoon = true; break; }
-              if(inBounds(r+3, af) && board[sqOf(r+3, af)] == B_P
-                 && rankOf(sqOf(r+3,af)) == 6
-                 && board[sqOf(r+2, af)] == EMPTY
-                 && board[sqOf(r+1, af)] == EMPTY) { canBeKickedSoon = true; break; }
+              int kickRank = r + 2;
+              if(!inBounds(kickRank, af)) continue;
+              if(board[sqOf(kickRank, af)] == B_P &&
+                 board[sqOf(r+1,     af)] == EMPTY) {
+                score -= 15;
+                break;
+              }
             }
-            // Exempt White pieces on ranks 0–1 (own back territory — safe)
-            if(canBeKickedSoon && r >= 2) score -= 18;
           }
         }
       }
@@ -2114,70 +2108,50 @@ void drawLeftPanel() {
   tft.drawFastVLine(13, 4, 104, 0x03A0);
 }
 
-// Segmented progress bar: 12 blocks of 7px height with 1px gap between.
-// Empty blocks = dark green outline on near-black fill.
-// Filled blocks = solid green, brightness increases toward top.
-// The bar border and percentage label use the top-segment color.
-#define PB_SEGS      12
-#define PB_SEG_H      7   // fill height per segment
-#define PB_SEG_GAP    1   // gap between segments
-#define PB_SEG_TOTAL  (PB_SEG_H + PB_SEG_GAP)  // 8px per segment slot
-// Total bar inner height = 12 * 8 - 1 = 95px (fits in PB_IH=96)
-
 void drawProgressBar(int pct) {
   if(pct == dispPct) return;
 
   int oldPct = dispPct;
   dispPct    = pct;
 
-  // How many segments should be filled (0–12)
-  int filledSegs = (pct * PB_SEGS + 50) / 100;  // rounded
-  if(filledSegs > PB_SEGS) filledSegs = PB_SEGS;
-
-  // Draw outer border on first call or reset
-  if(oldPct < 0 || pct == 0) {
-    // Outer frame — dim green border
+  // Full redraw on reset or first call
+  if(pct == 0 || oldPct < 0) {
+    // Outer border — single dim-green frame
     tft.drawRect(PB_X-1, PB_Y-1, PB_IW+4, PB_IH+3, 0x03A0);
-    // Fill entire bar area with near-black background
-    tft.fillRect(PB_X+1, PB_Y+1, PB_IW, PB_IH, 0x0020);
-    // Draw all 12 empty segment outlines
-    for(int s = 0; s < PB_SEGS; s++) {
-      // Segment 0 is at the BOTTOM, segment 11 at the TOP
-      int sy = PB_Y + 1 + (PB_IH - (s+1)*PB_SEG_TOTAL) + PB_SEG_GAP;
-      // Empty outline: very dim green rect
-      tft.drawRect(PB_X+1, sy, PB_IW-2, PB_SEG_H, 0x0180);
-    }
+    // Empty fill — dark but VISIBLE green (not black)
+    tft.fillRect(PB_X+1, PB_Y+1, PB_IW, PB_IH, 0x0180);
+    // Percentage label
+    tft.fillRect(PB_X-2, 112, 20, 9, C_BG);
+    tft.setTextColor(0x0180);
+    tft.setTextSize(1);
+    tft.setCursor(PB_X, 113);
+    tft.print("00%");
+    return;
   }
 
-  // Recompute old filled count
-  int oldFilled = (max(0,oldPct) * PB_SEGS + 50) / 100;
-  if(oldFilled > PB_SEGS) oldFilled = PB_SEGS;
+  int oldH = (PB_IH * max(0, oldPct)) / 100;
+  int newH = (PB_IH * pct) / 100;
+  if(newH > PB_IH) newH = PB_IH;
 
-  // Update only changed segments
-  for(int s = 0; s < PB_SEGS; s++) {
-    bool shouldBeFilled = (s < filledSegs);
-    bool wasFilled      = (s < oldFilled);
-    if(shouldBeFilled == wasFilled && oldPct >= 0) continue;  // no change
-
-    int sy = PB_Y + 1 + (PB_IH - (s+1)*PB_SEG_TOTAL) + PB_SEG_GAP;
-    uint16_t segCol = pgm_read_word(&pbSegColors[s]);
-
-    if(shouldBeFilled) {
-      // Fill solid with segment color
-      tft.fillRect(PB_X+2, sy+1, PB_IW-4, PB_SEG_H-2, segCol);
-      tft.drawRect(PB_X+1, sy,   PB_IW-2, PB_SEG_H,   segCol);
-    } else {
-      // Clear back to dark, re-draw dim outline
-      tft.fillRect(PB_X+1, sy, PB_IW-2, PB_SEG_H, 0x0020);
-      tft.drawRect(PB_X+1, sy, PB_IW-2, PB_SEG_H, 0x0180);
+  if(newH > oldH) {
+    // Fill newly-covered rows with gradient color
+    for(int y = oldH; y < newH; y++) {
+      int gradIdx = (y * 95) / PB_IH;
+      if(gradIdx > 95) gradIdx = 95;
+      uint16_t c = pgm_read_word(&pbGrad[gradIdx]);
+      int yy = PB_Y + 1 + PB_IH - 1 - y;  // bar fills bottom→top
+      tft.drawFastHLine(PB_X+1, yy, PB_IW, c);
     }
+  } else if(newH < oldH) {
+    // Clear rows back to visible empty color
+    tft.fillRect(PB_X+1, PB_Y+1, PB_IW, oldH - newH, 0x0180);
   }
 
-  // Percentage label below bar — color matches top filled segment
+  // Update percentage label
   tft.fillRect(PB_X-2, 112, 20, 9, C_BG);
-  uint16_t tc = (filledSegs > 0)
-    ? pgm_read_word(&pbSegColors[min(filledSegs-1, PB_SEGS-1)])
-    : 0x0180;
+  int gradIdx = (pct * 95) / 100;
+  if(gradIdx > 95) gradIdx = 95;
+  uint16_t tc = pgm_read_word(&pbGrad[gradIdx]);
   tft.setTextColor(tc);
   tft.setTextSize(1);
   tft.setCursor(PB_X, 113);
@@ -2758,68 +2732,78 @@ void showCheckmateScreen() {
     }
   }
 
-  // Top accent bar — dim red (you lost — danger)
+  // Top accent bar — red
   tft.fillRect(0, 0, 160, 3, 0xF800);
   tft.fillRect(0, 3, 160, 1, 0x8000);
 
-  // Fallen king — dark red body, bright green cross (defeated by the machine)
-  int cx = 80, cy = 28;
-  tft.fillRect(cx-10, cy+4, 20, 6, 0x8000);   // dark red crown body
+  // Fallen king pixel art — compact, at top
+  // Crown body: 20x6 at (70,14), cross at (78,8)–(78,20)
+  int cx = 80, cy = 18;
+  tft.fillRect(cx-10, cy+4, 20, 5, 0x8000);   // dark red crown base
   tft.fillRect(cx-10, cy,   3,  5, 0x8000);   // left point
-  tft.fillRect(cx-2,  cy-2, 5,  7, 0x03E0);   // center cross arm — green
+  tft.fillRect(cx-2,  cy-2, 5,  6, 0x03E0);   // center cross arm — green
   tft.fillRect(cx+7,  cy,   3,  5, 0x8000);   // right point
-  tft.fillRect(cx-2,  cy-6, 5,  5, 0x03E0);   // cross vertical — green
-  tft.fillRect(cx-5,  cy-3, 11, 2, 0x03E0);   // cross horizontal — green
-  tft.drawFastHLine(cx-14, cy+10, 28, 0x4000);
-  tft.fillRect(cx-14, cy+11, 28, 2, 0x2000);
+  tft.fillRect(cx-2,  cy-5, 5,  4, 0x03E0);   // cross vertical — green
+  tft.fillRect(cx-5,  cy-2, 11, 2, 0x03E0);   // cross horizontal — green
+  tft.drawFastHLine(cx-14, cy+9, 28, 0x4000); // topple shadow line
+  tft.fillRect(cx-14, cy+10, 28, 2, 0x2000);
 
-  // "YOU LOST" — solid bright red, uniform
+  // "YOU LOST" size 2 — fits in 96px at x=32
+  tft.setTextSize(2);
+  tft.setTextColor(0xF800);
   {
-    tft.setTextSize(2);
     const char* t1 = "YOU LOST";
-    int tlen = strlen(t1);
-    int tx0 = (160 - tlen*12)/2;
-    tft.setTextColor(0xF800);
-    tft.setCursor(tx0, 48);
+    int tx0 = (160 - (int)strlen(t1)*12) / 2;
+    tft.setCursor(tx0, 36);
     tft.print(t1);
   }
 
-  tft.drawFastHLine(20, 68, 120, 0x6000);
+  // Divider
+  tft.drawFastHLine(15, 56, 130, 0x6000);
 
-  // "CHECKMATE" — bright green (machine announces it coldly)
+  // "CHECKMATE" size 1 — 9 chars × 6px = 54px
+  tft.setTextSize(1);
+  tft.setTextColor(0x07E0);
   {
     const char* go = "CHECKMATE";
-    int gl = strlen(go);
-    tft.setTextColor(0x07E0);
-    tft.setCursor((160 - gl*6) / 2, 73);
+    tft.setCursor((160 - (int)strlen(go)*6) / 2, 61);
     tft.print(go);
   }
 
-  // "Black wins." — mid green
+  // "Black wins." size 1 — 11 chars × 6px = 66px
+  tft.setTextSize(1);
+  tft.setTextColor(0x03E0);
   {
     const char* yl = "Black wins.";
-    int yll = strlen(yl);
-    tft.setTextColor(0x03E0);
-    tft.setCursor((160 - yll*6) / 2, 85);
+    tft.setCursor((160 - (int)strlen(yl)*6) / 2, 73);
     tft.print(yl);
   }
 
-  // Bottom bar — dark red
-  tft.fillRect(0, 108, 160, 1, 0x6000);
-  tft.fillRect(0, 109, 160, 19, 0x0800);
+  // Bottom bar — dark mixed
+  tft.fillRect(0, 88, 160, 1, 0x4000);
+  tft.fillRect(0, 89, 160, 38, 0x0800);
 
-  // Piece row — alternating red/green (the two sides)
-  const uint16_t pieceCol[6] = {0xF800,0x03E0,0xF800,0x03E0,0xF800,0x03E0};
-  const char pieceChars2[6] = {'K','Q','R','B','N','P'};
+  // Piece row — alternating red/green
+  tft.setTextSize(1);
+  const uint16_t pcol[6] = {0xF800,0x03E0,0xF800,0x03E0,0xF800,0x03E0};
+  const char     pch[6]  = {'K','Q','R','B','N','P'};
   for(int i = 0; i < 6; i++) {
-    tft.setTextColor(pieceCol[i]);
-    tft.setCursor(14 + i*22, 111);
-    tft.print(pieceChars2[i]);
+    tft.setTextColor(pcol[i]);
+    tft.setCursor(14 + i*22, 91);
+    tft.print(pch[i]);
+  }
+
+  // Second piece row for visual weight
+  const uint16_t pcol2[6] = {0x03E0,0xF800,0x03E0,0xF800,0x03E0,0xF800};
+  for(int i = 0; i < 6; i++) {
+    tft.setTextColor(pcol2[i]);
+    tft.setCursor(14 + i*22, 103);
+    tft.print(pch[i]);
   }
 
   // Bottom edge — half red half green
-  tft.drawFastHLine(0,   127, 80, 0xF800);
-  tft.drawFastHLine(80,  127, 80, 0x03E0);
+  tft.drawFastHLine(0,  127, 80, 0xF800);
+  tft.drawFastHLine(80, 127, 80, 0x03E0);
 
   delay(1500);
 }
@@ -3100,7 +3084,7 @@ void playIntroCutscene() {
   };
   int versionCount = 8;
 
-  scrollNameAnimation(55, 61, 97, 14, versionNames, versionCount, "Beta", 0x47E4);
+  scrollNameAnimation(55, 61, 97, 14, versionNames, versionCount, "Sigma", 0x47E4);
 
   // ── Final locked display ──────────────────────────────────────
   delay(150);
@@ -3113,11 +3097,10 @@ void playIntroCutscene() {
   tft.fillRect(0, 82, 160, 1, 0x03E0);
   tft.fillRect(0, 83, 160, 28, 0x0020);
 
-  // "Mecha | Beta" in one bright line — centered
+  // "Mecha | Sigma" in one bright line — centered (5+1+5 chars × 6px = 66px)
   tft.setTextSize(1);
   {
-    // Center the combined label "Mecha  |  Beta"
-    int cx2 = (160 - (5+3+4)*6) / 2;  // rough center
+    int cx2 = (160 - 72) / 2;  // 72 = "Mecha | Sigma" width approx
     tft.setTextColor(0x07E0);
     tft.setCursor(cx2, 88);
     tft.print("Mecha");
@@ -3126,7 +3109,7 @@ void playIntroCutscene() {
     tft.print("|");
     tft.setTextColor(0x47E4);
     tft.setCursor(cx2 + 44, 88);
-    tft.print("Beta");
+    tft.print("Sigma");
   }
 
   // Thin rule
