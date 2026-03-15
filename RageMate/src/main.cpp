@@ -1,6 +1,8 @@
 /*
- * RageMate Medusa Theta — Chess Engine V1
- * Clean rewrite: unified scoring, correct SEE-based safety, no patch layers.
+ * RageMate Medusa Zeta V1
+ * Bug-fixed build: backward-move penalty corrected for black, knight fork check
+ * fixed to target enemy pawns, null-move depth corrected (depth-R not depth-1-R),
+ * openingMoveIndex double-increment removed, gamePhase queen-capture bypass removed.
  */
 
 #include <Arduino.h>
@@ -796,36 +798,30 @@ int gamePhase() {
   if(cachedPhase >= 0 && cachedPhaseHash == currentHash) return cachedPhase;
 
   int total = 0;
-  bool bQueenOnBoard = false;
   for(int s=0;s<64;s++) {
     int p=board[s]; if(!p) continue;
     int t=TYPE(p);
     if(t!=KING) total += PIECE_VAL[t];
-    if(p==B_Q) bQueenOnBoard=true;
   }
 
   int phase;
   if(total < 1800) {
     phase = 2;
   } else {
-    if(!bQueenOnBoard) {
-      phase = 1;
+    int undev = 0;
+    if(board[sqOf(7,1)]==B_N) undev++;
+    if(board[sqOf(7,6)]==B_N) undev++;
+    if(board[sqOf(7,2)]==B_B) undev++;
+    if(board[sqOf(7,5)]==B_B) undev++;
+
+    bool bothCastled = (!bCastle_K && !bCastle_Q) && (!wCastle_K && !wCastle_Q);
+
+    if(historyCount < 16 || undev >= 2) {
+      phase = 0;
+    } else if(historyCount < 30 && undev >= 1 && !bothCastled) {
+      phase = 0;
     } else {
-      int undev = 0;
-      if(board[sqOf(7,1)]==B_N) undev++;
-      if(board[sqOf(7,6)]==B_N) undev++;
-      if(board[sqOf(7,2)]==B_B) undev++;
-      if(board[sqOf(7,5)]==B_B) undev++;
-
-      bool bothCastled = (!bCastle_K && !bCastle_Q) && (!wCastle_K && !wCastle_Q);
-
-      if(historyCount < 16 || undev >= 2) {
-        phase = 0;
-      } else if(historyCount < 30 && undev >= 1 && !bothCastled) {
-        phase = 0;
-      } else {
-        phase = 1;
-      }
+      phase = 1;
     }
   }
 
@@ -1391,7 +1387,7 @@ int moveScore(Move& m) {
     for(auto& d:katt) {
       int pr=toR+d[0], pf=toF+d[1];
       if(inBounds(pr,pf)){int psq=sqOf(pr,pf);
-        if(board[psq]==B_P && seeCaptures(psq,1)>0){s+=400;break;}}
+        if(board[psq]==W_P && seeCaptures(psq,2)>0){s+=400;break;}}
     }
   }
 
@@ -1410,8 +1406,8 @@ int moveScore(Move& m) {
     if(m.to == lastBlackFrom && cap == EMPTY) s -= 220;
   }
 
-  // Backward move penalty
-  if(toR > frR && cap == EMPTY) s -= 100;
+  // Backward move penalty (black moves forward by decreasing rank)
+  if(toR < frR && cap == EMPTY) s -= 100;
 
   // Castling: reward if safe
   if(m.flags==2||m.flags==3) {
@@ -1567,7 +1563,7 @@ int alphaBeta(int depth, int alpha, int beta, bool maximizing, unsigned long sta
       currentHash ^= zobSide;
 
       int R = (depth >= 5) ? 3 : 2;  // adaptive null-move reduction
-      int nullScore = -alphaBeta(depth-1-R, -beta, -beta+1, !maximizing, startMs);
+      int nullScore = -alphaBeta(depth-R, -beta, -beta+1, !maximizing, startMs);
 
       whiteToMove = savedWTM;
       enPassantSq = savedEP;
@@ -2000,6 +1996,7 @@ Move getBotMove() {
     while(true) {
       iterBestMove  = {0,0,0,0};
       iterBestScore = -99999;
+      int loBound = alpha;  // preserve window lower bound before alpha gets updated
 
       for(int i=0; i<count; i++) {
         if(!isLegal(moves[i])) continue;
@@ -2024,12 +2021,12 @@ Move getBotMove() {
       if(searchAborted) break;
 
       // Check if we need to re-search with wider window
-      if(iterBestScore <= alpha - aspDelta && depth >= 3) {
-        // Fail low — widen
-        alpha = max(-99999, alpha - aspDelta*2);
+      if(iterBestScore <= loBound && depth >= 3) {
+        // Fail low — widen below
+        alpha = max(-99999, loBound - aspDelta*2);
         aspDelta *= 2;
       } else if(iterBestScore >= beta && depth >= 3) {
-        // Fail high — widen
+        // Fail high — widen above
         beta = min(99999, beta + aspDelta*2);
         aspDelta *= 2;
       } else {
@@ -3239,7 +3236,6 @@ void handleButton() {
           makeMove(botMove, &he2);
           history[historyCount++] = he2;
           hashHistory[hashHistoryCount++] = currentHash;
-          openingMoveIndex = min(openingMoveIndex+1, 2);
 
           lastBlackFrom = botMove.from;
           lastBlackTo   = botMove.to;
