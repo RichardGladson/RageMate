@@ -1,5 +1,5 @@
 /*
- * Medusa Gamma Chess Engine — v3 UI Edition
+ * Medusa Delta Chess Engine — v3 UI Edition
  * Changes vs v2:
  *  UI-1. Display flipped 180° (setRotation 3)
  *  UI-2. Undo requires 6-digit password via on-screen keypad
@@ -363,7 +363,7 @@ int hashHistoryCount = 0;
 bool searchAborted = false;
 unsigned long searchStart;
 uint32_t nodeCount = 0;
-#define SEARCH_TIME_MS 3000
+#define SEARCH_TIME_MS 4000
 
 // ─── Development tracking ─────────────────────────────────────────────────────
 uint64_t bPieceMoved = 0;
@@ -927,642 +927,300 @@ int seeMoveGain(int fromSq, int toSq, int piece, int attColor) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// MEDUSA POSITIONAL INTELLIGENCE SYSTEM
+// MEDUSA POSITIONAL INTELLIGENCE SYSTEM  v2
 // ─────────────────────────────────────────────────────────────────────────────
-// Layers:
-//  1. Positional Genome Scanner  — multi-axis fingerprint of the position
-//  2. Gambit Signature Matcher   — detects known opening patterns, loads doctrine
-//  3. Thermodynamic Pawn Map     — heat/cold zones, identifies breaks
-//  4. Style Reactor              — 5-personality blend driven by genome
-//  5. Evaluation delta           — all above applied as additive score adjustments
+// Design contract (the rule that prevents every past bug):
+//
+//   SAFETY FIRST. Every doctrinal bonus is GATED behind a SEE >= 0 check.
+//   The system never overrides material safety — it only influences preference
+//   among moves that are already safe. A piece on an unsafe square gets no
+//   doctrinal bonus, no matter what the opening calls for.
+//
+// Architecture:
+//   Layer 1 — Opening Classifier   : reads board, returns an OpeningProfile
+//   Layer 2 — Structural Evaluator : pure positional eval deltas (no bonuses
+//                                    that could override kick penalties)
+//   Layer 3 — Safe Move Advisor    : move-ordering bonuses, safety-gated
 // ═══════════════════════════════════════════════════════════════════════════════
 
-// ─── Layer 1: Positional Genome ───────────────────────────────────────────────
-struct PositionalGenome {
-  int pawn_tension;       // number of direct pawn confrontations
-  int king_exposure;      // (black king attackers) - (white king attackers): >0 = black unsafe
-  int piece_activity;     // black mobility - white mobility (legal square count proxy)
-  int center_control;     // control of e4/d4/e5/d5: >0 = white dominates
-  int open_file_pressure; // open/semi-open files with our rooks vs theirs
-  int sacrifice_signal;   // material imbalance relative to initiative factors
-  int tempo_debt;         // undev white minors - undev black minors (>0 = white behind)
-};
+// ─── Opening profile IDs ─────────────────────────────────────────────────────
+#define OP_UNKNOWN          0
+#define OP_KINGS_GAMBIT     1   // 1.e4 e5 2.f4
+#define OP_QUEENS_GAMBIT    2   // 1.d4 d5 2.c4
+#define OP_LONDON           3   // 1.d4 Nf3 Bf4
+#define OP_ITALIAN          4   // 1.e4 e5 Nf3 Bc4
+#define OP_SICILIAN         5   // 1.e4 c5
+#define OP_SCANDINAVIAN     6   // 1.e4 d5
+#define OP_FRENCH           7   // 1.e4 e6
+#define OP_CARO_KANN        8   // 1.e4 c6
+#define OP_DUTCH            9   // 1.d4 f5
+#define OP_KINGS_INDIAN    10   // 1.d4 Nf6 + g6
+#define OP_NIMZO           11   // 1.d4 Nf6 2.c4 e6 3.Nc3 Bb4
+#define OP_ENGLISH         12   // 1.c4
+#define OP_BIRD            13   // 1.f4
+#define OP_ALAPIN          14   // 1.e4 c5 2.c3 — Sicilian Alapin
+#define OP_OPEN_E4         15   // 1.e4 e5 (generic open game)
 
-// Count squares a piece on `sq` can move to (fast mobility proxy, no legality check)
-static int mobilityProxy(int sq) {
-  int p = board[sq]; if(!p) return 0;
-  int r = rankOf(sq), f = fileOf(sq), mob = 0;
-  switch(TYPE(p)) {
-    case KNIGHT: {
-      const int kd[8][2]={{2,1},{2,-1},{-2,1},{-2,-1},{1,2},{1,-2},{-1,2},{-1,-2}};
-      for(auto& d : kd) if(inBounds(r+d[0],f+d[1])) mob++;
-      break;
-    }
-    case BISHOP: {
-      const int bd[4][2]={{1,1},{1,-1},{-1,1},{-1,-1}};
-      for(auto& d : bd) {
-        int rr=r+d[0], ff=f+d[1];
-        while(inBounds(rr,ff)) { mob++; if(board[sqOf(rr,ff)]) break; rr+=d[0]; ff+=d[1]; }
-      }
-      break;
-    }
-    case ROOK: {
-      const int rd[4][2]={{1,0},{-1,0},{0,1},{0,-1}};
-      for(auto& d : rd) {
-        int rr=r+d[0], ff=f+d[1];
-        while(inBounds(rr,ff)) { mob++; if(board[sqOf(rr,ff)]) break; rr+=d[0]; ff+=d[1]; }
-      }
-      break;
-    }
-    case QUEEN: {
-      const int qd[8][2]={{1,0},{-1,0},{0,1},{0,-1},{1,1},{1,-1},{-1,1},{-1,-1}};
-      for(auto& d : qd) {
-        int rr=r+d[0], ff=f+d[1];
-        while(inBounds(rr,ff)) { mob++; if(board[sqOf(rr,ff)]) break; rr+=d[0]; ff+=d[1]; }
-      }
-      break;
-    }
-    default: mob = 1; break;
-  }
-  return mob;
-}
-
-PositionalGenome computeGenome() {
-  PositionalGenome g = {0,0,0,0,0,0,0};
-
-  // Pawn tension: pairs of opposing pawns facing each other diagonally
-  for(int s=0;s<64;s++) {
-    if(board[s]==W_P) {
-      int r=rankOf(s), f=fileOf(s);
-      for(int df=-1;df<=1;df+=2) {
-        if(inBounds(r+1,f+df) && board[sqOf(r+1,f+df)]==B_P) g.pawn_tension++;
-      }
-    }
-  }
-
-  // King exposure: attacker count around each king
-  int wKsq=-1, bKsq=-1;
-  for(int s=0;s<64;s++) {
-    if(board[s]==W_K) wKsq=s;
-    if(board[s]==B_K) bKsq=s;
-  }
-  auto countKingAttackers = [&](int ksq, bool byWhite) -> int {
-    if(ksq<0) return 0;
-    int cnt=0;
-    int kr=rankOf(ksq), kf=fileOf(ksq);
-    for(int dr=-2;dr<=2;dr++) for(int df=-2;df<=2;df++) {
-      if(dr==0&&df==0) continue;
-      if(!inBounds(kr+dr,kf+df)) continue;
-      int p=board[sqOf(kr+dr,kf+df)];
-      if(p && (byWhite ? IS_WHITE(p) : IS_BLACK(p)) && TYPE(p)!=KING) cnt++;
-    }
-    return cnt;
-  };
-  g.king_exposure = countKingAttackers(bKsq,true) - countKingAttackers(wKsq,false);
-
-  // Piece activity: mobility differential (black - white, so positive = black more active)
-  int wMob=0, bMob=0;
-  for(int s=0;s<64;s++) {
-    if(!board[s]) continue;
-    int m=mobilityProxy(s);
-    if(IS_WHITE(board[s])) wMob+=m; else bMob+=m;
-  }
-  g.piece_activity = bMob - wMob;  // positive = black more active (bad for us as black)
-
-  // Center control: attacks on e4/d4/e5/d5 (white squares = sq 27,28,35,36)
-  // Positive = white dominates center
-  const int centerSqs[4] = {sqOf(3,3),sqOf(3,4),sqOf(4,3),sqOf(4,4)};
-  for(int cs : centerSqs) {
-    if(isSquareAttacked(cs,true))  g.center_control++;
-    if(isSquareAttacked(cs,false)) g.center_control--;
-    int p=board[cs];
-    if(p) {
-      if(IS_WHITE(p)) g.center_control++;
-      else            g.center_control--;
-    }
-  }
-
-  // Open file pressure
-  for(int f=0;f<8;f++) {
-    bool wp=false, bp=false, wr=false, br=false;
-    for(int r=0;r<8;r++) {
-      int p=board[sqOf(r,f)];
-      if(p==W_P) wp=true; if(p==B_P) bp=true;
-      if(p==W_R||p==W_Q) wr=true; if(p==B_R||p==B_Q) br=true;
-    }
-    if(!bp && wr) g.open_file_pressure++;   // black has open file with our rook
-    if(!wp && br) g.open_file_pressure--;   // white has open file with their rook
-  }
-
-  // Sacrifice signal: material imbalance — if we're up material significantly vs initiative
-  int wMat=0, bMat=0;
-  for(int s=0;s<64;s++) {
-    int p=board[s]; if(!p||TYPE(p)==KING) continue;
-    if(IS_WHITE(p)) wMat+=PIECE_VAL[TYPE(p)];
-    else            bMat+=PIECE_VAL[TYPE(p)];
-  }
-  g.sacrifice_signal = wMat - bMat;  // positive = white up material
-
-  // Tempo debt: undeveloped minor pieces (positive = white behind in development)
-  int wUndev=0, bUndev=0;
-  if(board[sqOf(0,1)]==W_N) wUndev++;
-  if(board[sqOf(0,6)]==W_N) wUndev++;
-  if(board[sqOf(0,2)]==W_B) wUndev++;
-  if(board[sqOf(0,5)]==W_B) wUndev++;
-  if(board[sqOf(7,1)]==B_N) bUndev++;
-  if(board[sqOf(7,6)]==B_N) bUndev++;
-  if(board[sqOf(7,2)]==B_B) bUndev++;
-  if(board[sqOf(7,5)]==B_B) bUndev++;
-  g.tempo_debt = wUndev - bUndev;
-
-  return g;
-}
-
-// ─── Layer 2: Gambit Signature Matcher ───────────────────────────────────────
-// Doctrine IDs — how the engine should respond to detected opening
-#define DOCTRINE_NONE         0
-#define DOCTRINE_NEUTRALIZE   1   // Solid response, no panic, consolidate
-#define DOCTRINE_SUBVERT      2   // Exploit tempo debt, punish premature attacks
-#define DOCTRINE_FORTRESS     3   // Lock down king safety, build pawn wall
-#define DOCTRINE_COUNTER_ATK  4   // Direct queenside/center counter-attack
-#define DOCTRINE_STRANGLE     5   // Space control, slow suffocation
-#define DOCTRINE_ACCEPT_GAMBIT 6  // Accept material, trade down to endgame
-
-struct GambitDoctrine {
+// ─── Layer 1: Opening Classifier ─────────────────────────────────────────────
+// Pure board-state pattern matching. Returns an integer ID.
+// Never modifies evaluation or move scores directly.
+struct OpeningProfile {
   int  id;
-  int  personality_strangler;   // 0-10 blend weight
-  int  personality_pyromaniac;
-  int  personality_fortress;
-  int  personality_subverter;
-  // Evaluation nudges (applied as score deltas for black)
-  int  center_break_bonus;      // bonus for d5/e5 breaks
-  int  king_safety_premium;     // extra weight on king shelter
-  int  piece_trade_bonus;       // bonus for trading pieces (simplify into endgame)
-  int  initiative_cancel_bonus; // bonus for moves that neutralize opponent tempo
+  int  move_num;          // roughly how many moves have been played
+  bool white_has_center;  // white occupies/controls e4 or d4
+  bool black_has_center;  // black occupies/controls e5 or d5
+  bool white_space_adv;   // white has clear space advantage
+  bool black_cramped;     // black has less than 3 central pawn levers available
+  // Structural flags used by evaluator
+  bool white_d_pawn_push; // white pawn on d5 (space stake)
+  bool white_e_pawn_push; // white pawn on e5 (space stake)
+  bool open_e_file;       // e-file is open or semi-open
+  bool open_d_file;
+  // Break squares: the squares black should target to relieve pressure
+  int  primary_break_file;    // file index of the best pawn break, -1 if none
+  int  primary_break_rank;    // rank the black pawn should reach
 };
 
-// Detect what opening white is playing and return a doctrine
-GambitDoctrine detectAndLoadDoctrine() {
-  GambitDoctrine d;
-  d.id = DOCTRINE_NONE;
-  d.personality_strangler = 2;
-  d.personality_pyromaniac = 2;
-  d.personality_fortress = 2;
-  d.personality_subverter = 2;
-  d.center_break_bonus = 0;
-  d.king_safety_premium = 0;
-  d.piece_trade_bonus = 0;
-  d.initiative_cancel_bonus = 0;
+OpeningProfile classifyOpening() {
+  OpeningProfile p;
+  p.id = OP_UNKNOWN;
+  p.move_num = historyCount / 2;
 
-  if(historyCount < 2) return d;  // too early
+  // Snapshot key squares
+  bool wE4 = (board[sqOf(3,4)] == W_P);
+  bool wD4 = (board[sqOf(3,3)] == W_P);
+  bool wC4 = (board[sqOf(3,2)] == W_P);
+  bool wF4 = (board[sqOf(3,5)] == W_P);
+  bool wE5 = (board[sqOf(4,4)] == W_P);
+  bool wD5 = (board[sqOf(4,3)] == W_P);
+  bool wNf3= (board[sqOf(2,5)] == W_N);
+  bool wBc4= (board[sqOf(2,2)] == W_B);
+  bool wBf4= (board[sqOf(2,5)] == W_B);
+  bool wNc3= (board[sqOf(2,2)] == W_N);
 
-  // Board pattern shortcuts
-  bool wE4 = (board[sqOf(3,4)]==W_P);
-  bool wD4 = (board[sqOf(3,3)]==W_P);
-  bool wC4 = (board[sqOf(3,2)]==W_P);
-  bool wF4 = (board[sqOf(3,5)]==W_P);
-  bool bE5 = (board[sqOf(4,4)]==B_P);
-  bool bD5 = (board[sqOf(4,3)]==B_P);
-  bool bNf6= (board[sqOf(5,5)]==B_N);
-  bool bC6 = (board[sqOf(5,2)]==B_P);
-  bool wNf3= (board[sqOf(2,5)]==W_N);
-  bool wBc4= (board[sqOf(2,2)]==W_B);
-  bool wBf4= (board[sqOf(2,5)]==W_B);   // London bishop
-  bool wNd2= (board[sqOf(1,3)]==W_N);
-  bool wPf4= (board[sqOf(3,5)]==W_P);   // f4 push
+  bool bE5 = (board[sqOf(4,4)] == B_P);
+  bool bD5 = (board[sqOf(4,3)] == B_P);
+  bool bC5 = (board[sqOf(4,2)] == B_P);
+  bool bF5 = (board[sqOf(4,5)] == B_P);
+  bool bE6 = (board[sqOf(5,4)] == B_P);
+  bool bC6 = (board[sqOf(5,2)] == B_P);  // pawn on c6
+  bool bNf6= (board[sqOf(5,5)] == B_N);
+  bool bG6 = (board[sqOf(5,6)] == B_P);
 
-  // ── King's Gambit: 1.e4 e5 2.f4 ─────────────────────────────────────────
-  // White sacrifices f-pawn for rapid development and f-file attack.
-  // Counter-doctrine: Subverter+Pyromaniac — accept if safe, build counterplay,
-  // use the extra pawn to win the endgame.
-  if(wE4 && bE5 && wPf4) {
-    d.id = DOCTRINE_ACCEPT_GAMBIT;
-    d.personality_subverter   = 7;
-    d.personality_pyromaniac  = 5;
-    d.personality_fortress    = 4;
-    d.personality_strangler   = 1;
-    d.center_break_bonus      = 60;  // d5 counter-break is critical
-    d.king_safety_premium     = 40;  // king is exposed — shelter first
-    d.piece_trade_bonus       = 35;  // trade down — extra pawn wins ending
-    d.initiative_cancel_bonus = 50;  // cancel white's f-file initiative
-    return d;
-  }
+  p.white_has_center  = wE4 || wD4;
+  p.black_has_center  = bE5 || bD5;
+  p.white_space_adv   = wE5 || wD5;
+  p.white_d_pawn_push = wD5;
+  p.white_e_pawn_push = wE5;
+  p.black_cramped     = (wE5 || wD5) && !bD5 && !bE5;
 
-  // ── Queen's Gambit: 1.d4 d5 2.c4 ────────────────────────────────────────
-  // White pressures d5 pawn. Don't accept carelessly.
-  // Counter-doctrine: Strangler — hold d5, develop solidly, fight for center.
-  if(wD4 && bD5 && wC4) {
-    d.id = DOCTRINE_STRANGLE;
-    d.personality_strangler   = 8;
-    d.personality_subverter   = 4;
-    d.personality_fortress    = 3;
-    d.personality_pyromaniac  = 1;
-    d.center_break_bonus      = 50;  // c5 break is the thermal release valve
-    d.king_safety_premium     = 20;
-    d.piece_trade_bonus       = 20;
-    d.initiative_cancel_bonus = 30;
-    return d;
-  }
-
-  // ── London System: 1.d4 + Bf4/Nf3 + e3 pawn chain ───────────────────────
-  // White builds a solid boring structure. Fight for same space, create asymmetry.
-  // Counter-doctrine: Strangler — contest the c4 and e5 squares, avoid symmetry.
-  if(wD4 && wNf3 && wBf4) {
-    d.id = DOCTRINE_STRANGLE;
-    d.personality_strangler   = 9;
-    d.personality_subverter   = 3;
-    d.personality_fortress    = 2;
-    d.personality_pyromaniac  = 1;
-    d.center_break_bonus      = 45;  // e5 or c5 break creates asymmetry
-    d.king_safety_premium     = 15;
-    d.piece_trade_bonus       = -20; // avoid trades — London wants symmetry, we want life
-    d.initiative_cancel_bonus = 25;
-    return d;
-  }
-
-  // ── Italian Game / Giuoco Piano: 1.e4 e5 2.Nf3 Nc6 3.Bc4 ────────────────
-  // Slow buildup. Counter with d6/d5 central break.
-  if(wE4 && bE5 && wNf3 && wBc4) {
-    d.id = DOCTRINE_COUNTER_ATK;
-    d.personality_subverter   = 5;
-    d.personality_strangler   = 4;
-    d.personality_pyromaniac  = 3;
-    d.personality_fortress    = 3;
-    d.center_break_bonus      = 40;
-    d.king_safety_premium     = 20;
-    d.piece_trade_bonus       = 10;
-    d.initiative_cancel_bonus = 20;
-    return d;
-  }
-
-  // ── Scandinavian Defense mirror: if white pushes e4 and we played d5 ─────
-  // Black already challenged center. Continue pressure on d-file.
-  if(wE4 && bD5) {
-    d.id = DOCTRINE_COUNTER_ATK;
-    d.personality_pyromaniac  = 6;
-    d.personality_subverter   = 5;
-    d.personality_fortress    = 2;
-    d.personality_strangler   = 2;
-    d.center_break_bonus      = 55;
-    d.king_safety_premium     = 25;
-    d.piece_trade_bonus       = 15;
-    d.initiative_cancel_bonus = 35;
-    return d;
-  }
-
-  // ── English Opening: 1.c4 ────────────────────────────────────────────────
-  // Flank control without occupying center. Fight back through center directly.
-  if(wC4 && !wD4 && !wE4) {
-    d.id = DOCTRINE_COUNTER_ATK;
-    d.personality_strangler   = 5;
-    d.personality_subverter   = 5;
-    d.personality_pyromaniac  = 3;
-    d.personality_fortress    = 2;
-    d.center_break_bonus      = 50;
-    d.king_safety_premium     = 15;
-    d.piece_trade_bonus       = 10;
-    d.initiative_cancel_bonus = 20;
-    return d;
-  }
-
-  // ── Bird's Opening: 1.f4 ─────────────────────────────────────────────────
-  // White weakens kingside. Attack it directly with From's Gambit idea (e5).
-  if(wF4 && !wE4 && !wD4) {
-    d.id = DOCTRINE_COUNTER_ATK;
-    d.personality_pyromaniac  = 8;
-    d.personality_subverter   = 5;
-    d.personality_fortress    = 2;
-    d.personality_strangler   = 1;
-    d.center_break_bonus      = 65;  // e5 is the classic counter
-    d.king_safety_premium     = 10;
-    d.piece_trade_bonus       = 0;
-    d.initiative_cancel_bonus = 45;
-    return d;
-  }
-
-  // ── Default: solid, balanced ─────────────────────────────────────────────
-  d.id = DOCTRINE_NEUTRALIZE;
-  d.personality_strangler   = 3;
-  d.personality_subverter   = 3;
-  d.personality_fortress    = 3;
-  d.personality_pyromaniac  = 2;
-  d.center_break_bonus      = 20;
-  d.king_safety_premium     = 20;
-  d.piece_trade_bonus       = 0;
-  d.initiative_cancel_bonus = 15;
-  return d;
-}
-
-// ─── Layer 3: Thermodynamic Pawn Map ─────────────────────────────────────────
-// For each file, compute how "hot" (contested/breakthrough potential) it is.
-// Returns a heat value per file: positive = white pressure, negative = black pressure.
-// Used to steer evaluation toward the correct flank.
-void computePawnHeatMap(int heatMap[8]) {
-  for(int f=0;f<8;f++) heatMap[f]=0;
-
-  for(int s=0;s<64;s++) {
-    int p=board[s]; if(!p) continue;
-    if(TYPE(p)!=PAWN) continue;
-    int f=fileOf(s), r=rankOf(s);
-    if(IS_WHITE(p)) {
-      // Forward heat: rank advancement = more pressure upward
-      heatMap[f] += r * 2;
-      // Diagonal coverage
-      if(f>0) heatMap[f-1] += r;
-      if(f<7) heatMap[f+1] += r;
-    } else {
-      // Black pawn pushes downward
-      int br = 7 - r;
-      heatMap[f] -= br * 2;
-      if(f>0) heatMap[f-1] -= br;
-      if(f<7) heatMap[f+1] -= br;
-    }
-  }
-}
-
-// ─── Layer 4: Style Reactor ───────────────────────────────────────────────────
-// Given a genome and a doctrine, compute evaluation deltas for the position.
-// All deltas are from Black's perspective (positive = good for Black).
-int styleReactorDelta(const PositionalGenome& g, const GambitDoctrine& doc,
-                      int bKsq, int wKsq) {
-  int delta = 0;
-
-  // ── The Strangler ──────────────────────────────────────────────────────────
-  // Thrives when center control is being contested. Rewards space restriction.
+  // e/d file open?
   {
-    int w = doc.personality_strangler;
-    if(w > 0) {
-      // Reward controlling center as black
-      delta += (-g.center_control) * w * 3;
-      // Reward having less pawn tension (locked = strangled)
-      if(g.pawn_tension <= 1) delta += w * 5;
-      // Reward open file pressure in our favor
-      if(g.open_file_pressure < 0) delta += (-g.open_file_pressure) * w * 2;
+    bool wEpawn=false, bEpawn=false, wDpawn=false, bDpawn=false;
+    for(int r=0;r<8;r++) {
+      if(board[sqOf(r,4)]==W_P) wEpawn=true;
+      if(board[sqOf(r,4)]==B_P) bEpawn=true;
+      if(board[sqOf(r,3)]==W_P) wDpawn=true;
+      if(board[sqOf(r,3)]==B_P) bDpawn=true;
     }
+    p.open_e_file = !wEpawn && !bEpawn;
+    p.open_d_file = !wDpawn && !bDpawn;
   }
 
-  // ── The Pyromaniac ────────────────────────────────────────────────────────
-  // Loves open files, piece activity, sacrifices with compensation.
-  {
-    int w = doc.personality_pyromaniac;
-    if(w > 0) {
-      // Reward piece activity
-      if(g.piece_activity < 0) delta += (-g.piece_activity) * w * 2;
-      // Reward open file pressure
-      if(g.open_file_pressure < 0) delta += (-g.open_file_pressure) * w * 3;
-      // Slight bonus for pawn tension (creates open lines)
-      delta += g.pawn_tension * w;
-    }
-  }
+  // Default break squares — overridden per opening below
+  p.primary_break_file = 3;  // d-file
+  p.primary_break_rank = 4;  // rank 4 (from white's 0-based: black's 4th rank push)
 
-  // ── The Fortress ──────────────────────────────────────────────────────────
-  // Activates when the black king is at risk. Locks down the position.
-  {
-    int w = doc.personality_fortress;
-    if(w > 0 && bKsq >= 0) {
-      // If black king is exposed (many white attackers near king)
-      if(g.king_exposure > 2) {
-        delta -= g.king_exposure * w * 8;  // heavily penalize king exposure
-      }
-      // Reward king safety premium from doctrine
-      delta += doc.king_safety_premium * w / 3;
-    }
-  }
+  // ── Classify ──────────────────────────────────────────────────────────────
+  if(wE4 && bE5 && wF4)                  { p.id = OP_KINGS_GAMBIT;
+                                            p.primary_break_file = 3; p.primary_break_rank = 4; }
+  else if(wD4 && bD5 && wC4)             { p.id = OP_QUEENS_GAMBIT;
+                                            p.primary_break_file = 2; p.primary_break_rank = 4; }
+  else if(wD4 && wNf3 && wBf4)           { p.id = OP_LONDON;
+                                            p.primary_break_file = 4; p.primary_break_rank = 4; }
+  else if(wE4 && bE5 && wNf3 && wBc4)   { p.id = OP_ITALIAN;
+                                            p.primary_break_file = 3; p.primary_break_rank = 4; }
+  else if(wE4 && bC5 && wC4 && wNf3)    { p.id = OP_ALAPIN;
+                                            p.primary_break_file = 3; p.primary_break_rank = 4; }
+  else if(wE4 && bC5)                    { p.id = OP_SICILIAN;
+                                            p.primary_break_file = 3; p.primary_break_rank = 4; }
+  else if(wE4 && bD5)                    { p.id = OP_SCANDINAVIAN;
+                                            p.primary_break_file = 3; p.primary_break_rank = 3; }
+  else if(wE4 && bE6)                    { p.id = OP_FRENCH;
+                                            p.primary_break_file = 2; p.primary_break_rank = 4; }
+  else if(wE4 && bC6)                    { p.id = OP_CARO_KANN;
+                                            p.primary_break_file = 3; p.primary_break_rank = 4; }
+  else if(wD4 && bF5)                    { p.id = OP_DUTCH;
+                                            p.primary_break_file = 4; p.primary_break_rank = 4; }
+  else if(wD4 && bNf6 && bG6)            { p.id = OP_KINGS_INDIAN;
+                                            p.primary_break_file = 4; p.primary_break_rank = 4; }
+  else if(wD4 && wC4 && bNf6 && bE6 && wNc3)
+                                          { p.id = OP_NIMZO;
+                                            p.primary_break_file = 2; p.primary_break_rank = 4; }
+  else if(wC4 && !wD4 && !wE4)           { p.id = OP_ENGLISH;
+                                            p.primary_break_file = 3; p.primary_break_rank = 4; }
+  else if(wF4 && !wE4 && !wD4)           { p.id = OP_BIRD;
+                                            p.primary_break_file = 4; p.primary_break_rank = 4; }
+  else if(wE4 && bE5)                    { p.id = OP_OPEN_E4;
+                                            p.primary_break_file = 3; p.primary_break_rank = 4; }
 
-  // ── The Subverter ─────────────────────────────────────────────────────────
-  // Exploits white's tempo debt (undeveloped pieces).
-  {
-    int w = doc.personality_subverter;
-    if(w > 0) {
-      // If white is behind in development (positive tempo_debt = white behind)
-      if(g.tempo_debt > 0) delta += g.tempo_debt * w * 10;
-      // Reward initiative cancellation
-      delta += doc.initiative_cancel_bonus * w / 5;
-    }
-  }
-
-  // ── Doctrine-specific bonuses ─────────────────────────────────────────────
-  // Piece trade bonus (simplified endgame)
-  if(doc.piece_trade_bonus != 0) {
-    // Count pieces traded (fewer pieces = more applicable)
-    int totalPieces = 0;
-    for(int s=0;s<64;s++) {
-      if(board[s] && TYPE(board[s])!=KING && TYPE(board[s])!=PAWN) totalPieces++;
-    }
-    // Bonus scales: fewer pieces = more relevant (endgame approaching)
-    int tradeRelevance = max(0, 14 - totalPieces);
-    delta += doc.piece_trade_bonus * tradeRelevance / 5;
-  }
-
-  return delta;
+  return p;
 }
 
-// ─── Layer 5: Thermodynamic Break Bonus ──────────────────────────────────────
-// Reward black for controlling the "thermal release valve" — the break square
-// identified by the pawn heat map. Applied inside evaluate().
-int thermodynamicBreakBonus(const GambitDoctrine& doc, const int heatMap[8]) {
-  int bonus = 0;
-  if(doc.center_break_bonus <= 0) return 0;
-
-  // Find the hottest contested file (where white has heat pressure)
-  // The "thermal release valve" for black is breaking on that file or adjacent
-  int hottestFile = 3;  // default to d-file
-  int hottestHeat = -9999;
-  for(int f=2;f<=5;f++) {  // only center files
-    if(heatMap[f] > hottestHeat) { hottestHeat = heatMap[f]; hottestFile = f; }
-  }
-
-  // Check if black has a pawn that can break on the hottest file or adjacent
-  for(int df=-1;df<=1;df++) {
-    int tf = hottestFile + df;
-    if(tf<0||tf>7) continue;
-    for(int r=3;r<=5;r++) {
-      if(board[sqOf(r,tf)]==B_P) {
-        // Pawn in position to create tension on the hot file
-        bonus += doc.center_break_bonus;
-        break;
-      }
-    }
-  }
-
-  // Extra reward if we've already executed the break (pawn on rank 4 in center)
-  for(int f=2;f<=5;f++) {
-    if(board[sqOf(3,f)]==B_P) bonus += doc.center_break_bonus / 2;
-  }
-
-  return bonus;
-}
-
-// ─── Master PIS integration function ─────────────────────────────────────────
-// Called from evaluate(). Returns total delta to add to score (black perspective).
-int positionalIntelligenceDelta() {
-  if(!isOpeningPhase()) return 0;  // only fires in opening/early middlegame
-
-  PositionalGenome genome = computeGenome();
-  GambitDoctrine doctrine = detectAndLoadDoctrine();
-
-  int bKsq=-1, wKsq=-1;
-  for(int s=0;s<64;s++) {
-    if(board[s]==W_K) wKsq=s;
-    if(board[s]==B_K) bKsq=s;
-  }
-
-  int heatMap[8];
-  computePawnHeatMap(heatMap);
-
-  int delta = 0;
-  delta += styleReactorDelta(genome, doctrine, bKsq, wKsq);
-  delta += thermodynamicBreakBonus(doctrine, heatMap);
-
-  // Clamp to prevent runaway evaluation swings
-  if(delta >  250) delta =  250;
-  if(delta < -250) delta = -250;
-
-  return delta;
-}
-
-// ─── PIS move ordering bonus ─────────────────────────────────────────────────
-// Called from moveScore() for black moves in opening. Returns extra score.
-int pisMoveBonus(Move& m) {
+// ─── Layer 2: Structural Evaluator ────────────────────────────────────────────
+// Pure delta on the position score (white-relative, so positive = good for white).
+// NEVER adds bonuses that compete with safety checks — only structural assessment.
+int structuralEvalDelta(const OpeningProfile& op) {
   if(!isOpeningPhase()) return 0;
-  if(!IS_BLACK(board[m.from])) return 0;
+  int delta = 0;
 
-  GambitDoctrine doc = detectAndLoadDoctrine();
+  // ── Space disadvantage penalty ───────────────────────────────────────────
+  // If white has a space advantage (advanced central pawn), penalise black's
+  // cramped position. This is a pure structural fact, not a "style" preference.
+  if(op.white_space_adv) {
+    delta += 20;  // white gets static bonus for advanced center
+    if(op.black_cramped) delta += 15;  // worse if black has no counterplay
+  }
 
-  int bonus = 0;
-  int toR = rankOf(m.to), toF = fileOf(m.to);
+  // ── Opening-specific structural bonuses ──────────────────────────────────
+  switch(op.id) {
+    case OP_KINGS_GAMBIT:
+      // Black holding the extra f-pawn with good structure is winning long-term
+      if(board[sqOf(3,5)] == B_P) delta -= 25;  // black kept f4 pawn
+      break;
+
+    case OP_QUEENS_GAMBIT:
+      // Black holding d5 with Nf6 + e6 is the classical solid QGD
+      if(board[sqOf(4,3)] == B_P) delta -= 15;  // black holds d5 — good
+      // Black accepting and returning pawn is fine too
+      break;
+
+    case OP_LONDON:
+      // London wants symmetry — penalise black for playing symmetrically
+      {
+        bool symE = (board[sqOf(4,4)]==B_P) && (board[sqOf(3,4)]==W_P);
+        bool symD = (board[sqOf(4,3)]==B_P) && (board[sqOf(3,3)]==W_P);
+        if(symE && symD) delta += 10;  // symmetry = London's dream, slightly bad for black
+      }
+      break;
+
+    case OP_DUTCH:
+      // Dutch: black's f5 is committal. Penalise if the kingside is overextended
+      // without king safety. Bonus for completed kingside development.
+      if(board[sqOf(4,5)] == B_P) {  // black f5 pawn advanced
+        bool bKingCastled = !bCastle_K && !bCastle_Q;
+        if(!bKingCastled) delta += 12;  // king still in center with f-pawn advanced
+      }
+      break;
+
+    case OP_FRENCH:
+      // French: white's e5 chain is strong. c5 break is the release valve.
+      if(op.white_e_pawn_push && board[sqOf(4,2)] != B_P) delta += 15; // c5 not played yet
+      break;
+
+    case OP_SICILIAN:
+    case OP_ALAPIN:
+      // Sicilian: d5 break is the key. Bonus for white if black hasn't played it.
+      if(board[sqOf(3,3)] == W_P && board[sqOf(4,3)] != B_P) delta += 10;
+      break;
+
+    default: break;
+  }
+
+  // ── General: reward black for executing the primary break ─────────────────
+  // If black's break pawn has reached the target rank, reward it.
+  if(op.primary_break_file >= 0) {
+    int bf = op.primary_break_file;
+    int br = op.primary_break_rank;
+    if(inBounds(br, bf) && board[sqOf(br, bf)] == B_P) {
+      delta -= 20;  // black executed the break — structural relief
+    }
+  }
+
+  return delta;
+}
+
+// ─── Layer 3: Safe Move Advisor ───────────────────────────────────────────────
+// Move-ordering bonuses. HARD RULE: every bonus is gated behind:
+//   (a) board[m.to] == EMPTY  (quiet move — captures handled by SEE elsewhere)
+//   (b) seeCaptures(m.to, 1) == 0  (white gains nothing by capturing on landing sq)
+// If either check fails, no doctrinal bonus is applied.
+int pisMoveBonusSafe(Move& m, const OpeningProfile& op) {
+  if(op.id == OP_UNKNOWN) return 0;
+
   int piece = board[m.from];
+  int toR = rankOf(m.to), toF = fileOf(m.to);
+  int bonus = 0;
 
-  // ── Landing square safety (SEE-based) ────────────────────────────────────
-  // For quiet piece placements (no capture), check whether the landing square
-  // is actually safe using SEE. If the engine places a bishop/knight on a square
-  // where it can be won immediately (e.g. pawn takes, net material loss), heavily
-  // penalise the move. This catches the bishop-for-pawn blunder regardless of
-  // whether it's a pawn kick, a knight fork, or any other attacker.
-  if((TYPE(piece) == KNIGHT || TYPE(piece) == BISHOP) && board[m.to] == EMPTY) {
-    // Simulate the piece landing, then evaluate SEE on that square from white's view
-    int netLoss = seeCaptures(m.to, 1);  // how much white can gain by capturing here
-    // netLoss > 0 means white wins material by capturing our piece on m.to
-    if(netLoss > 0) {
-      // Scale penalty by how bad the loss is
-      // Losing a bishop (330) for a pawn (100) = netLoss ~230 → big penalty
-      bonus -= netLoss * 3;
+  // Gate: only apply to quiet moves where the landing square is safe
+  if(board[m.to] != EMPTY) return 0;
+  if(seeCaptures(m.to, 1) > 0) return 0;  // white wins material here → no bonus
+
+  // ── Break pawn bonuses (pawns only, always safe by definition if SEE >= 0) ─
+  if(TYPE(piece) == PAWN && IS_BLACK(piece)) {
+    // Reward advancing toward the primary break square
+    if(toF == op.primary_break_file && toR <= op.primary_break_rank + 1 && toR >= op.primary_break_rank - 1) {
+      bonus += 80;
     }
+    // Opening-specific critical break bonuses
+    if(op.id == OP_KINGS_GAMBIT    && toF == 3 && toR == 4) bonus += 60;  // d5
+    if(op.id == OP_QUEENS_GAMBIT   && toF == 2 && toR == 4) bonus += 60;  // c5
+    if(op.id == OP_LONDON          && toF == 4 && toR == 4) bonus += 50;  // e5
+    if(op.id == OP_FRENCH          && toF == 2 && toR == 4) bonus += 70;  // c5
+    if(op.id == OP_DUTCH           && toF == 4 && toR == 4) bonus += 50;  // e5
+    if(op.id == OP_BIRD            && toF == 4 && toR == 4) bonus += 70;  // e5
+    if(op.id == OP_ALAPIN          && toF == 3 && toR == 4) bonus += 80;  // d5 key move
   }
 
-  // ── Pawn-kick zone check (safe-advance-aware) ─────────────────────────────
-  // A square is threatened by a pawn kick ONLY if:
-  //   (a) a white pawn currently attacks it OR can advance to attack it, AND
-  //   (b) that pawn advance is actually safe (SEE >= 0 for white pushing the pawn)
-  // If the pawn can't safely advance (it's defended), no kick will ever happen —
-  // treat as a safe outpost and don't penalise.
-  if(TYPE(piece) == KNIGHT || TYPE(piece) == BISHOP) {
-    // Direct kick: white pawn currently on (toR-1, toF±1)
-    bool directKick = false;
-    bool kickIsSafe = false;
-    for(int df = -1; df <= 1; df += 2) {
-      int pr = toR - 1, pf = toF + df;
-      if(inBounds(pr, pf) && board[sqOf(pr, pf)] == W_P) {
-        directKick = true;
-        // The pawn is already attacking — the kick is already "live"
-        // (it doesn't need to advance; it attacks diagonally from where it is)
-        kickIsSafe = true;
-        break;
-      }
-    }
+  // ── Knight/Bishop development bonuses ─────────────────────────────────────
+  if((TYPE(piece) == KNIGHT || TYPE(piece) == BISHOP) && IS_BLACK(piece)) {
+    // Central development always good when safe
+    bool isCentral = (toF >= 2 && toF <= 5 && toR >= 3 && toR <= 5);
+    if(isCentral) bonus += 30;
 
-    // Outpost test: no white pawn on adjacent files can ever advance to attack
-    bool isOutpost = true;
-    for(int df = -1; df <= 1; df += 2) {
-      int adjF = toF + df;
-      if(adjF < 0 || adjF > 7) continue;
-      for(int rr = 0; rr < toR; rr++) {
-        if(board[sqOf(rr, adjF)] == W_P) {
-          // There's a white pawn below on adjacent file. Can it safely advance
-          // all the way to (toR-1, adjF) to threaten our piece?
-          // Simple check: is the immediate next square empty and safe to push to?
-          int pawnRank = rr;
-          bool pathClear = true;
-          for(int pr = pawnRank + 1; pr <= toR - 1; pr++) {
-            if(board[sqOf(pr, adjF)] != EMPTY) { pathClear = false; break; }
-          }
-          if(pathClear) {
-            // Check if the pawn push to (toR-1, adjF) is safe using SEE
-            // Temporarily simulate the pawn advancing one step at a time is complex;
-            // instead check if the square one rank below our piece on adjF is safe
-            // for a white pawn using seeCaptures on that square
-            int attackSq = sqOf(toR - 1, adjF);
-            uint8_t savedAttSq = board[attackSq];
-            uint8_t savedPawn  = board[sqOf(pawnRank, adjF)];
-            board[attackSq]              = W_P;
-            board[sqOf(pawnRank, adjF)]  = EMPTY;
-            int pawnSafety = seeCaptures(attackSq, 2);  // black capturing the advanced pawn
-            board[attackSq]              = savedAttSq;
-            board[sqOf(pawnRank, adjF)]  = savedPawn;
-            if(pawnSafety <= 0) {
-              // Black can't profitably capture the pawn when it advances → pawn push safe → not an outpost
-              isOutpost = false;
-            }
-            // else: black can capture the advancing pawn (pawn push is losing) → still an outpost
-          }
-          break;
-        }
-      }
-      if(!isOutpost) break;
-    }
-
-    if(directKick && !isOutpost) {
-      bonus -= 500;  // genuine tempo loss — pawn attacks and will stay
-    } else if(directKick && isOutpost) {
-      // Pawn attacks now but can't be reinforced — safe anchor
-      bool central = (toF >= 2 && toF <= 5 && toR >= 3 && toR <= 5);
-      if(central) bonus += 80;
-    } else if(!directKick && !isOutpost) {
-      // Imminent kick: white pawn can safely advance to attack
-      for(int df = -1; df <= 1; df += 2) {
-        int pr = toR - 2, pf = toF + df;
-        if(inBounds(pr, pf) && board[sqOf(pr, pf)] == W_P &&
-           board[sqOf(pr+1, pf)] == EMPTY) {
-          bonus -= 200;
-          break;
-        }
-      }
-    }
+    // Opening-specific piece placement bonuses
+    if(op.id == OP_KINGS_GAMBIT && TYPE(piece) == KNIGHT && toF == 5 && toR == 5) bonus += 40; // Nf6
+    if(op.id == OP_ITALIAN      && TYPE(piece) == BISHOP && toF == 2 && toR == 4) bonus += 35; // Bc5
+    if(op.id == OP_SICILIAN     && TYPE(piece) == KNIGHT && toF == 2 && toR == 5) bonus += 30; // Nc6
+    if(op.id == OP_DUTCH        && TYPE(piece) == KNIGHT && toF == 5 && toR == 5) bonus += 30; // Nf6
+    if(op.id == OP_KINGS_INDIAN && TYPE(piece) == BISHOP && toF == 6 && toR == 5) bonus += 40; // Bg7
   }
 
-  // Center break bonus: prioritize pawns advancing to break squares
-  if(TYPE(piece) == PAWN) {
-    bool isCenterFile = (toF >= 2 && toF <= 5);
-    bool isBreakRank  = (toR >= 3 && toR <= 4);
-    if(isCenterFile && isBreakRank) bonus += doc.center_break_bonus;
-
-    // King's Gambit: d5 counter is the #1 priority response
-    if(doc.id == DOCTRINE_ACCEPT_GAMBIT && toF == 3 && toR == 4) bonus += 150;
-    // Queen's Gambit: c5 break is the release valve
-    if(doc.id == DOCTRINE_STRANGLE && toF == 2 && toR == 4) bonus += 120;
-    // Bird's counter: e5 push
-    if(doc.id == DOCTRINE_COUNTER_ATK && toF == 4 && toR == 4) bonus += 130;
-  }
-
-  // Subverter: moves that exploit white's undeveloped pieces get a boost
-  if(doc.personality_subverter >= 5 && TYPE(piece) == KNIGHT) {
-    // Knight to outpost squares (e4, d4 area — rank 3 for black = rank index 3)
-    if(toR == 3 && toF >= 2 && toF <= 5) bonus += doc.initiative_cancel_bonus;
-  }
-
-  // Fortress: if doctrine calls for king safety, boost castling heavily
-  if(doc.personality_fortress >= 4 && m.flags == 2) bonus += 200;
-
-  // Accept Gambit doctrine: trade pieces to simplify
-  if(doc.id == DOCTRINE_ACCEPT_GAMBIT && board[m.to] != EMPTY) {
-    bonus += doc.piece_trade_bonus;
+  // ── Castling bonus — gated by king safety need ────────────────────────────
+  if(m.flags == 2 || m.flags == 3) {  // castling
+    // Always reward castling, scale by how exposed the king is
+    int bKsq = -1;
+    for(int s=0;s<64;s++) if(board[s]==B_K) { bKsq=s; break; }
+    int kf = (bKsq >= 0) ? fileOf(bKsq) : 4;
+    // King on e-file in open position = very urgent
+    bool openCenter = (board[sqOf(3,4)]==W_P || board[sqOf(4,4)]==W_P);
+    bonus += openCenter ? 120 : 60;
+    // Extra for Dutch/KID where king safety is critical
+    if(op.id == OP_DUTCH || op.id == OP_KINGS_INDIAN) bonus += 40;
   }
 
   return bonus;
+}
+
+// ─── Master PIS integration ───────────────────────────────────────────────────
+// Called from evaluate() — returns structural delta (white-relative).
+int positionalIntelligenceDelta() {
+  if(!isOpeningPhase()) return 0;
+  OpeningProfile op = classifyOpening();
+  return structuralEvalDelta(op);
+}
+
+// ─── PIS move ordering bonus (public interface) ───────────────────────────────
+// Called from moveScore(). Safety-gated, never overrides kick penalties.
+int pisMoveBonusV2(Move& m) {
+  if(!isOpeningPhase()) return 0;
+  if(!board[m.from]) return 0;
+  OpeningProfile op = classifyOpening();
+  return pisMoveBonusSafe(m, op);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// END MEDUSA POSITIONAL INTELLIGENCE SYSTEM
+// END MEDUSA POSITIONAL INTELLIGENCE SYSTEM v2
 // ═══════════════════════════════════════════════════════════════════════════════
 
 // ─── Evaluation ───────────────────────────────────────────────────────────────
@@ -1762,108 +1420,83 @@ int evaluate() {
       }
       if(tp == KNIGHT || tp == BISHOP) {
         int r = rankOf(s), f = fileOf(s);
-        // ── Context-aware pawn-kick / outpost evaluation ────────────────────────
-        // A piece is truly threatened only when the pawn that attacks or will attack
-        // it can safely advance. If the pawn push is losing (defended square), the
-        // piece is on a genuine outpost — reward it, don't penalise it.
         int threatPenalty = opening ? 45 : 30;
 
-        if(IS_BLACK(p)) {
-          bool directKick = false;
-          for(int df = -1; df <= 1; df += 2) {
-            int pr = r - 1, pf = f + df;
-            if(inBounds(pr, pf) && board[sqOf(pr, pf)] == W_P) { directKick = true; break; }
+        // Determine attacker direction based on piece color
+        int enemyPawn  = IS_BLACK(p) ? W_P : B_P;
+        int atkRankOff = IS_BLACK(p) ? -1  : 1;  // enemy pawn attacks from this rank offset
+
+        // Direct kick: enemy pawn currently attacks this square
+        bool directKick = false;
+        for(int df = -1; df <= 1; df += 2) {
+          int pr = r + atkRankOff, pf = f + df;
+          if(inBounds(pr, pf) && board[sqOf(pr, pf)] == enemyPawn) {
+            directKick = true; break;
           }
-          // Outpost: check each adjacent-file white pawn — only a non-outpost if
-          // the pawn can safely advance to an attack diagonal
-          bool isOutpost = true;
+        }
+
+        // Outpost test: no enemy pawn on adjacent files can safely advance to attack
+        bool isOutpost = true;
+        if(IS_BLACK(p)) {
           for(int df = -1; df <= 1; df += 2) {
             int adjF = f + df;
             if(adjF < 0 || adjF > 7) continue;
             for(int rr = 0; rr < r; rr++) {
-              if(board[sqOf(rr, adjF)] == W_P) {
-                // Can this pawn safely advance to (r-1, adjF)?
-                bool pathClear = true;
-                for(int pr = rr + 1; pr <= r - 1; pr++) {
-                  if(board[sqOf(pr, adjF)] != EMPTY) { pathClear = false; break; }
-                }
-                if(pathClear) {
-                  int attackSq = sqOf(r - 1, adjF);
-                  uint8_t savedA = board[attackSq];
-                  uint8_t savedP = board[sqOf(rr, adjF)];
-                  board[attackSq]        = W_P;
-                  board[sqOf(rr, adjF)]  = EMPTY;
-                  int pawnSafety = seeCaptures(attackSq, 2);
-                  board[attackSq]        = savedA;
-                  board[sqOf(rr, adjF)]  = savedP;
-                  if(pawnSafety <= 0) { isOutpost = false; }  // pawn push safe
-                }
-                break;
+              if(board[sqOf(rr, adjF)] != W_P) continue;
+              bool pathClear = true;
+              for(int pr = rr+1; pr < r; pr++) {
+                if(board[sqOf(pr, adjF)] != EMPTY) { pathClear=false; break; }
               }
+              if(pathClear) {
+                int aSq = sqOf(r-1, adjF);
+                uint8_t sA=board[aSq], sP=board[sqOf(rr,adjF)];
+                board[aSq]=W_P; board[sqOf(rr,adjF)]=EMPTY;
+                int safety = seeCaptures(aSq, 2);
+                board[aSq]=sA; board[sqOf(rr,adjF)]=sP;
+                if(safety <= 0) { isOutpost=false; }
+              }
+              break;
             }
             if(!isOutpost) break;
           }
-
-          if(directKick) {
-            if(isOutpost) {
-              if(f >= 2 && f <= 5 && r >= 3 && r <= 5) score -= 15;
-            } else {
-              score += threatPenalty;
-            }
-          } else if(opening && !isOutpost) {
-            for(int df = -1; df <= 1; df += 2) {
-              int pr = r - 2, pf = f + df;
-              if(inBounds(pr, pf) && board[sqOf(pr, pf)] == W_P &&
-                 board[sqOf(pr+1, pf)] == EMPTY) { score += 18; break; }
-            }
-          }
         } else {
-          // Mirror for white pieces under black pawn threat
-          bool directKick = false;
-          for(int df = -1; df <= 1; df += 2) {
-            int pr = r + 1, pf = f + df;
-            if(inBounds(pr, pf) && board[sqOf(pr, pf)] == B_P) { directKick = true; break; }
-          }
-          bool isOutpost = true;
           for(int df = -1; df <= 1; df += 2) {
             int adjF = f + df;
             if(adjF < 0 || adjF > 7) continue;
             for(int rr = 7; rr > r; rr--) {
-              if(board[sqOf(rr, adjF)] == B_P) {
-                bool pathClear = true;
-                for(int pr = rr - 1; pr >= r + 1; pr--) {
-                  if(board[sqOf(pr, adjF)] != EMPTY) { pathClear = false; break; }
-                }
-                if(pathClear) {
-                  int attackSq = sqOf(r + 1, adjF);
-                  uint8_t savedA = board[attackSq];
-                  uint8_t savedP = board[sqOf(rr, adjF)];
-                  board[attackSq]        = B_P;
-                  board[sqOf(rr, adjF)]  = EMPTY;
-                  int pawnSafety = seeCaptures(attackSq, 1);
-                  board[attackSq]        = savedA;
-                  board[sqOf(rr, adjF)]  = savedP;
-                  if(pawnSafety <= 0) { isOutpost = false; }
-                }
-                break;
+              if(board[sqOf(rr, adjF)] != B_P) continue;
+              bool pathClear = true;
+              for(int pr = rr-1; pr > r; pr--) {
+                if(board[sqOf(pr, adjF)] != EMPTY) { pathClear=false; break; }
               }
+              if(pathClear) {
+                int aSq = sqOf(r+1, adjF);
+                uint8_t sA=board[aSq], sP=board[sqOf(rr,adjF)];
+                board[aSq]=B_P; board[sqOf(rr,adjF)]=EMPTY;
+                int safety = seeCaptures(aSq, 1);
+                board[aSq]=sA; board[sqOf(rr,adjF)]=sP;
+                if(safety <= 0) { isOutpost=false; }
+              }
+              break;
             }
             if(!isOutpost) break;
           }
+        }
 
-          if(directKick) {
-            if(isOutpost) {
-              if(f >= 2 && f <= 5 && r >= 2 && r <= 4) score += 15;
-            } else {
-              score -= threatPenalty;
+        if(directKick) {
+          if(isOutpost) {
+            // Kicked to a permanent outpost — reward centrality
+            if(f >= 2 && f <= 5 && r >= 3 && r <= 5) {
+              if(IS_BLACK(p)) score -= 15; else score += 15;
             }
-          } else if(opening && !isOutpost) {
-            for(int df = -1; df <= 1; df += 2) {
-              int pr = r + 2, pf = f + df;
-              if(inBounds(pr, pf) && board[sqOf(pr, pf)] == B_P &&
-                 board[sqOf(pr-1, pf)] == EMPTY) { score -= 18; break; }
-            }
+          } else {
+            if(IS_BLACK(p)) score += threatPenalty;
+            else            score -= threatPenalty;
           }
+        } else if(opening && !isOutpost) {
+          // Imminent kick — pawn can safely advance to attack
+          if(IS_BLACK(p)) score += 18;
+          else            score -= 18;
         }
       }
     }
@@ -2054,6 +1687,21 @@ int moveScore(Move& m) {
 
   if(m.flags==1) s += 2000;
 
+  // ── Universal piece safety check (all phases, both colors) ───────────────
+  // Must come BEFORE the opening early-return below.
+  // Simulate the piece landing and check SEE from the opponent's view.
+  {
+    int p = piece;
+    if(board[m.to] == EMPTY && TYPE(p) != PAWN && TYPE(p) != KING) {
+      uint8_t savedTo = board[m.to], savedFrom = board[m.from];
+      board[m.to] = p; board[m.from] = EMPTY;
+      int attColor = IS_BLACK(p) ? 1 : 2;
+      int netLoss  = seeCaptures(m.to, attColor);
+      board[m.to] = savedTo; board[m.from] = savedFrom;
+      if(netLoss > 0) s -= netLoss * 4;
+    }
+  }
+
   bool opening = isOpeningPhase();
   if(!IS_BLACK(piece) || !opening) return s;
 
@@ -2179,8 +1827,107 @@ int moveScore(Move& m) {
   if((TYPE(piece)==KNIGHT||TYPE(piece)==BISHOP)&&m.to==lastBlackFrom&&cap==EMPTY)
     s -= 220;
 
-  // Medusa PIS move ordering bonus
-  s += pisMoveBonus(m);
+  // ── Piece safety on landing square ───────────────────────────────────────
+  // For any piece (not just opening, not just black), check if the landing
+  // square is safe. Simulate the piece landing, then run SEE from the
+  // opponent's perspective. This is the correct way to check — SEE needs the
+  // piece on the square to know what can be captured there.
+  if(cap == EMPTY && TYPE(piece) != PAWN && TYPE(piece) != KING) {
+    // Temporarily place the piece on the target square
+    uint8_t savedTo   = board[m.to];
+    uint8_t savedFrom = board[m.from];
+    board[m.to]   = piece;
+    board[m.from] = EMPTY;
+
+    int attColor = IS_BLACK(piece) ? 1 : 2;  // opponent's color
+    int netLoss  = seeCaptures(m.to, attColor);
+
+    board[m.to]   = savedTo;
+    board[m.from] = savedFrom;
+
+    if(netLoss > 0) {
+      // Losing material by moving here — penalise proportionally
+      s -= netLoss * 4;
+    }
+  }
+
+  // ── Pawn threat on landing square (1-ply and 2-ply lookahead) ────────────
+  // For knights and bishops: check if an enemy pawn currently attacks the
+  // landing square (direct kick), or if an enemy pawn one step away can safely
+  // advance to attack it next move (imminent kick).
+  // This fires for all phases, both colors.
+  if(TYPE(piece) == KNIGHT || TYPE(piece) == BISHOP) {
+    int atkDir    = IS_BLACK(piece) ? -1 : 1;   // direction white pawn attacks: +1 rank
+    int enemyPawn = IS_BLACK(piece) ? W_P : B_P;
+    int atkRankOff = IS_BLACK(piece) ? -1 : 1;  // white pawn on toR-1 attacks toR
+
+    // Direct kick: enemy pawn already attacks the landing square diagonally
+    bool directKick = false;
+    for(int df = -1; df <= 1; df += 2) {
+      int pr = toR + atkRankOff, pf = toF + df;
+      if(inBounds(pr, pf) && board[sqOf(pr, pf)] == enemyPawn) {
+        directKick = true;
+        break;
+      }
+    }
+
+    // Outpost test: is there NO enemy pawn on adjacent files that can ever
+    // advance far enough to attack this square?
+    // An enemy pawn on adjFile at rank rr (below our landing rank for white pawns)
+    // can eventually reach the attack square — unless it's blocked or capturable.
+    bool isOutpost = true;
+    if(IS_BLACK(piece)) {
+      // White pawns attack upward; check adjacent files for white pawns below toR
+      for(int df = -1; df <= 1; df += 2) {
+        int adjF = toF + df;
+        if(adjF < 0 || adjF > 7) continue;
+        for(int rr = 0; rr < toR; rr++) {
+          if(board[sqOf(rr, adjF)] != W_P) continue;
+          // White pawn found on adjacent file. Can it safely advance to (toR-1, adjF)?
+          bool pathClear = true;
+          for(int pr = rr + 1; pr < toR; pr++) {
+            if(board[sqOf(pr, adjF)] != EMPTY) { pathClear = false; break; }
+          }
+          if(pathClear) {
+            // Simulate pawn advancing to attack rank and check if the push is safe
+            int attackSq = sqOf(toR - 1, adjF);
+            uint8_t sA = board[attackSq], sP = board[sqOf(rr, adjF)];
+            board[attackSq] = W_P; board[sqOf(rr, adjF)] = EMPTY;
+            int safety = seeCaptures(attackSq, 2);  // black capturing the pawn
+            board[attackSq] = sA; board[sqOf(rr, adjF)] = sP;
+            if(safety <= 0) { isOutpost = false; break; }  // pawn advance is safe
+          }
+          break;
+        }
+        if(!isOutpost) break;
+      }
+    }
+
+    if(directKick) {
+      if(!isOutpost) {
+        s -= 480;  // kicked AND can be re-kicked — big tempo loss
+      } else {
+        // Kicked to an outpost — this is fine, possibly even good
+        bool central = (toF >= 2 && toF <= 5 && toR >= 3 && toR <= 5);
+        if(central && IS_BLACK(piece)) s += 60;
+      }
+    } else if(!isOutpost && IS_BLACK(piece)) {
+      // No current kick, but pawn can safely advance to kick next move
+      // Check if a white pawn two ranks below can advance directly
+      bool imminentKick = false;
+      for(int df = -1; df <= 1; df += 2) {
+        int pr = toR - 2, pf = toF + df;
+        if(inBounds(pr, pf) && board[sqOf(pr, pf)] == W_P &&
+           board[sqOf(pr + 1, pf)] == EMPTY) {
+          imminentKick = true; break;
+        }
+      }
+      if(imminentKick) s -= 220;
+    }
+  }
+
+  // Medusa PIS v2 move ordering bonus (safety-gated, never overrides kick penalties)
+  s += pisMoveBonusV2(m);
 
   return s;
 }
@@ -2360,36 +2107,6 @@ int alphaBeta(int depth, int alpha, int beta, bool maximizing, unsigned long sta
     Move& m = moves[i];
     if(!isLegal(m)) continue;
     legalCount2++;
-
-    // ── Opening repeat-mover pruning ────────────────────────────────────────
-    // During the opening, if a piece has already moved this game and there are
-    // undeveloped pieces at home, skip re-moving it unless:
-    //   (a) it's a capture (forcing/material)
-    //   (b) it's castling
-    //   (c) it's the only legal move (handled by legalCount2 == 0 fallback)
-    //   (d) depth <= 1 (near-leaf — let quiescence handle tactical followups)
-    // This directly prunes the Nc6→Ne5 re-kick chain and similar patterns.
-    if(depth >= 2 && isOpeningPhase() && !inCheck) {
-      int mover = board[m.from];
-      bool isBLack = IS_BLACK(mover);
-      bool reMove = isBLack
-        ? ((bPieceMoved & (1ULL << m.from)) != 0)
-        : false;  // only apply to engine (black) for now
-      if(reMove && board[m.to] == EMPTY && m.flags == 0 && m.promo == 0) {
-        // Count undeveloped black minors
-        int undev = 0;
-        if(board[sqOf(7,1)]==B_N) undev++;
-        if(board[sqOf(7,6)]==B_N) undev++;
-        if(board[sqOf(7,2)]==B_B) undev++;
-        if(board[sqOf(7,5)]==B_B) undev++;
-        if(undev >= 2) {
-          // Skip this move — developing a new piece is almost always better
-          // (legalCount2 already incremented, but we won't search it)
-          legalCount2--;
-          continue;
-        }
-      }
-    }
 
     if(depth==1 && !inCheck && board[m.to]==EMPTY && !m.promo) {
       int ev = whiteToMove ? evaluate() : -evaluate();
@@ -4026,7 +3743,7 @@ void playIntroCutscene() {
   };
   int versionCount = 8;
 
-  scrollNameAnimation(55, 61, 97, 14, versionNames, versionCount, "Gamma", 0x47E4);
+  scrollNameAnimation(55, 61, 97, 14, versionNames, versionCount, "Delta", 0x47E4);
 
   // ── Final locked display ──────────────────────────────────────
   delay(150);
@@ -4039,7 +3756,7 @@ void playIntroCutscene() {
   tft.fillRect(0, 82, 160, 1, 0x03E0);
   tft.fillRect(0, 83, 160, 28, 0x0020);
 
-  // "Medusa | Gamma" centered in summary band
+  // "Medusa | Delta" centered in summary band
   tft.setTextSize(1);
   tft.setTextColor(0x07E0);
   tft.setCursor(36, 90);
@@ -4049,7 +3766,7 @@ void playIntroCutscene() {
   tft.print("|");
   tft.setTextColor(0x47E4);
   tft.setCursor(88, 90);
-  tft.print("Gamma");
+  tft.print("Delta");
 
   // Thin rule
   tft.drawFastHLine(10, 101, 140, 0x03A0);
