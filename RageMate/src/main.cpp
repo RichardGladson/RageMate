@@ -1272,10 +1272,35 @@ int moveScore(Move& m) {
   bool opening  = isOpeningPhase();
   bool isBlack  = IS_BLACK(piece);
 
-  // ── 1. Captures — SEE-based ordering ─────────────────────────────────────
+  // ── 1. Captures — MVV-LVA + SEE ordering ─────────────────────────────────
+  // Priority tiers (high to low):
+  //   Winning captures  (SEE > 0):  7000 + SEE gain + LVA bonus
+  //   Even captures     (SEE == 0): 5000            + LVA bonus
+  //   Losing captures   (SEE < 0):  1000 + SEE gain (negative, below quiet moves)
+  //
+  // Within winning and even captures, LVA (Least Valuable Attacker) ensures
+  // the cheapest piece captures first — e.g. pawn takes knight ranks above
+  // queen takes knight even when both win the same material. This is correct
+  // chess: use your least valuable piece to make a winning trade, preserve
+  // your more valuable pieces.
+  //
+  // LVA bonus: PIECE_VAL[KING] - PIECE_VAL[attacker_type]
+  //   Pawn   attacker: 20000 - 100  = 19900  (highest — go first)
+  //   Knight attacker: 20000 - 320  = 19680
+  //   Bishop attacker: 20000 - 330  = 19670
+  //   Rook   attacker: 20000 - 500  = 19500
+  //   Queen  attacker: 20000 - 900  = 19100  (lowest  — go last)
+  //   King   attacker: 20000 - 20000 = 0
   if(cap) {
-    int seeNet = seeMoveGain(m.from, m.to, piece, isBlack ? 2 : 1);
-    s += (seeNet > 0) ? 7000 + seeNet : (seeNet == 0) ? 5000 : 1000 + seeNet;
+    int seeNet  = seeMoveGain(m.from, m.to, piece, isBlack ? 2 : 1);
+    int lva     = PIECE_VAL[KING] - PIECE_VAL[TYPE(piece)];  // higher = cheaper attacker
+    if(seeNet > 0) {
+      s += 7000 + seeNet + lva;   // winning: SEE gain + LVA
+    } else if(seeNet == 0) {
+      s += 5000 + lva;            // even: just LVA to prefer cheaper attacker
+    } else {
+      s += 1000 + seeNet;         // losing: no LVA bonus, ranked by how much we lose
+    }
   }
   if(m.promo)  s += 3000 + PIECE_VAL[m.promo];
   if(m.flags==1) s += 2000;
