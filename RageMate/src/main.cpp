@@ -1,13 +1,10 @@
 /*
- * RageMate Valkyra Alpha V6
- * New: 37-theme colour selector (UI-5).
- *   - Small palette button below UNDO in left panel (panelFocus 3, single-press)
- *   - Full-screen scrollable theme menu with name + 3-swatch preview
- *   - Back button (joystick left or button while on panel) returns to board
- *   - Active theme colours applied to ALL screens via refreshTheme()
- *   - Resets to WOOD (index 0) on doRestart()
- *   - 4 special themes removed (HACKER, FIRE, HIGH CONTRAST, RAINBOW)
- * V5 memory optimisations retained.
+ * RageMate Valkyra Beta V3
+ * Changes from V6:
+ *   - Theme menu: dynamic hold-scroll (UP/DN), hold-left progress bar to go back
+ *   - Engine last-move highlight: doubled outline thickness, always pure white + black
+ *   - UND panel: 'D' now uses C_HOVER (always fully visible)
+ *   - Intro/splash updated to Beta V3
  */
 
 #include <Arduino.h>
@@ -2644,8 +2641,11 @@ void drawBoard() {
 
 void drawLastMoveOutlines(int from, int to) {
   if(from<0||to<0) return;
-  tft.drawRect(sqX(from), sqY(from), SQ_W, SQ_H, C_LASTMOVE);
-  tft.drawRect(sqX(to),   sqY(to),   SQ_W, SQ_H, C_LASTMOVE);
+  // Double outline: outer pure white, inner pure black — maximally visible on any theme
+  tft.drawRect(sqX(from)-1, sqY(from)-1, SQ_W+2, SQ_H+2, 0xFFFF);
+  tft.drawRect(sqX(from),   sqY(from),   SQ_W,   SQ_H,   0x0000);
+  tft.drawRect(sqX(to)-1,   sqY(to)-1,   SQ_W+2, SQ_H+2, 0xFFFF);
+  tft.drawRect(sqX(to),     sqY(to),     SQ_W,   SQ_H,   0x0000);
 }
 
 void drawLegalDots() {
@@ -2678,8 +2678,10 @@ void drawCursorAt(int col, int row) {
 void redrawSquareWithArrow(int sq, int cursorSq=-1) {
   drawSquare(sq);
   if(engineFrom >= 0 && engineTo >= 0) {
-    if(sq == engineFrom || sq == engineTo)
-      tft.drawRect(sqX(sq), sqY(sq), SQ_W, SQ_H, C_LASTMOVE);
+    if(sq == engineFrom || sq == engineTo) {
+      tft.drawRect(sqX(sq)-1, sqY(sq)-1, SQ_W+2, SQ_H+2, 0xFFFF);
+      tft.drawRect(sqX(sq),   sqY(sq),   SQ_W,   SQ_H,   0x0000);
+    }
   }
   if(selSq == sq) tft.drawRect(sqX(sq), sqY(sq), SQ_W, SQ_H, C_SEL);
 }
@@ -2751,7 +2753,7 @@ void drawLeftPanel() {
   tft.setTextSize(1);
   tft.setTextColor(C_BTN_HL);  tft.setCursor(4, 50); tft.print('U');
   tft.setTextColor(C_BORDER);  tft.setCursor(4, 59); tft.print('N');
-  tft.setTextColor(C_BTN_BG);  tft.setCursor(4, 68); tft.print('D');
+  tft.setTextColor(C_HOVER);   tft.setCursor(4, 68); tft.print('D');
 
   // ── Palette (theme) button — y 83..100 ─────────────────────────────────
   // A small square showing the current theme's 3-colour swatch
@@ -3331,17 +3333,17 @@ void playIntroCutscene() {
   tft.setCursor((160 - (int)strlen(l1)*12) / 2, 34);
   tft.print(l1);
 
-  // Subtitle: "Valkyra Alpha"
+  // Subtitle: "Valkyra"
   tft.setTextSize(1);
-  const char* l2 = "Valkyra Alpha";
+  const char* l2 = "Valkyra";
   tft.setTextColor(C_I_TITLE2);
   tft.setCursor((160 - (int)strlen(l2)*6) / 2, 58);
   tft.print(l2);
 
   // Version
-  const char* l3 = "V6";
+  const char* l3 = "Beta V3";
   tft.setTextColor(C_I_SUB);
-  tft.setCursor((160 - (int)strlen(l3)*6) / 2, 72);
+  tft.setCursor((160 - (int)strlen(l3)*6) / 2, 70);
   tft.print(l3);
 
   // Prompt
@@ -3703,29 +3705,33 @@ void drawThemeMenuRow(int idx, int slotY, bool selected) {
   }
 }
 
+// ─── Theme menu constants ────────────────────────────────────────────────────
+#define TM_BACK_MS     1200   // hold-left duration to exit (ms)
+#define TM_PB_X        2      // back-progress bar left x
+#define TM_PB_Y        121    // back-progress bar top y
+#define TM_PB_W        156    // back-progress bar max width
+#define TM_PB_H        4      // back-progress bar height
+#define TM_REPEAT_INIT  400   // ms before auto-repeat kicks in
+#define TM_REPEAT_FAST   80   // ms between scroll steps during auto-repeat
+
 void showThemeMenu() {
-  // Draw full menu screen
+  // ── Initial full draw ─────────────────────────────────────────────────────
   tft.fillScreen(C_BG);
   tft.fillRect(0, 0, 160, 18, C_BTN_BG);
   tft.setTextSize(1);
-  tft.setTextColor(C_HOVER);
-  tft.setCursor(4, 3);  tft.print("COLOUR THEME");
-  tft.setTextColor(C_BORDER);
-  tft.setCursor(4, 11); tft.print("BTN=select  LEFT=back");
+  tft.setTextColor(C_HOVER);   tft.setCursor(4, 3);  tft.print("COLOUR THEME");
+  tft.setTextColor(C_BORDER);  tft.setCursor(4, 11); tft.print("BTN=select  HOLD LEFT=back");
   tft.drawFastHLine(0, 18, 160, C_BORDER);
 
   // Footer
   tft.drawFastHLine(0, 118, 160, C_BORDER);
   tft.fillRect(0, 119, 160, 9, C_BG);
   tft.setTextColor(C_BORDER); tft.setTextSize(1);
-  tft.setCursor(4, 120); tft.print("UP/DN scroll");
+  tft.setCursor(4, 120); tft.print("hold left to go back");
 
   uint8_t sel = themeMenuSel;
-
-  // Clamp sel to valid range
   if(sel >= NUM_THEMES) sel = 0;
 
-  // Draw initial rows
   int winStart = (int)sel - TM_ROWS_VIS/2;
   if(winStart < 0) winStart = 0;
   if(winStart > NUM_THEMES - TM_ROWS_VIS) winStart = NUM_THEMES - TM_ROWS_VIS;
@@ -3737,62 +3743,132 @@ void showThemeMenu() {
     drawThemeMenuRow(idx, TM_ROW_Y0 + slot*TM_ROW_H, idx == sel);
   }
 
-  // Input loop
-  unsigned long lastNav = 0;
-  bool jWasU=false, jWasD=false, jWasL=false, btnWas=false;
+  // ── State ─────────────────────────────────────────────────────────────────
+  unsigned long lastScrollTime = 0;   // when we last moved the cursor
+  bool          inRepeat       = false;
+  unsigned long holdDownStart  = 0;   // when UP/DN was first pressed
+  int           lastDir        = 0;   // +1 down, -1 up, 0 none
 
+  unsigned long leftHoldStart  = 0;   // when joystick-left was first pushed
+  int8_t        lastPbFill     = -1;  // last drawn progress bar fill width
+
+  bool btnWas = false;
+
+  auto drawBackBar = [&](int fillW) {
+    // Draw the hold-left progress bar in the footer
+    tft.fillRect(TM_PB_X, TM_PB_Y, TM_PB_W, TM_PB_H, C_BTN_BG);
+    tft.drawRect(TM_PB_X, TM_PB_Y, TM_PB_W, TM_PB_H, C_BORDER);
+    if(fillW > 0)
+      tft.fillRect(TM_PB_X+1, TM_PB_Y+1, fillW, TM_PB_H-2, C_HOVER);
+    lastPbFill = fillW;
+  };
+
+  // ── Input loop ────────────────────────────────────────────────────────────
   while(true) {
-    bool pressed = (digitalRead(JOY_SW) == LOW);
-    int vx = analogRead(JOY_VRX);
-    int vy = analogRead(JOY_VRY);
+    unsigned long now   = millis();
+    bool pressed        = (digitalRead(JOY_SW) == LOW);
+    int  vx             = analogRead(JOY_VRX);
+    int  vy             = analogRead(JOY_VRY);
     bool jU = (vy < 1000), jD = (vy > 3000), jL = (vx < 1000);
 
-    if(millis() - lastNav > 160) {
-      uint8_t prevSel = sel;
-
-      if(jU && !jWasU) {
-        if(sel > 0) sel--;
-        lastNav = millis();
-      }
-      if(jD && !jWasD) {
-        if(sel < NUM_THEMES-1) sel++;
-        lastNav = millis();
-      }
-      if(jL && !jWasL) {
-        // Back — return to board without changing theme
+    // ── Hold-left: back with progress bar ────────────────────────────────
+    if(jL) {
+      if(leftHoldStart == 0) leftHoldStart = now;
+      unsigned long held = now - leftHoldStart;
+      int fillW = (int)((held * (long)(TM_PB_W-2)) / TM_BACK_MS);
+      if(fillW > TM_PB_W-2) fillW = TM_PB_W-2;
+      if((int8_t)fillW != lastPbFill) drawBackBar(fillW);
+      if(held >= TM_BACK_MS) {
+        // Exit without changing theme
         themeMenuSel = sel;
         drawAll();
         return;
       }
+    } else {
+      // Released left — cancel and wipe bar if it was started
+      if(leftHoldStart != 0) {
+        leftHoldStart = 0;
+        tft.fillRect(TM_PB_X, TM_PB_Y, TM_PB_W, TM_PB_H+1, C_BG);
+        lastPbFill = -1;
+      }
+    }
 
-      // Redraw only changed rows if sel moved
-      if(sel != prevSel) {
-        int newWinStart = (int)sel - TM_ROWS_VIS/2;
-        if(newWinStart < 0) newWinStart = 0;
-        if(newWinStart > NUM_THEMES - TM_ROWS_VIS) newWinStart = NUM_THEMES - TM_ROWS_VIS;
-        if(newWinStart < 0) newWinStart = 0;
+    // ── Dynamic hold-scroll ───────────────────────────────────────────────
+    int dir = jU ? -1 : jD ? 1 : 0;
 
-        // Full redraw only if window shifted, else just update two rows
-        if(newWinStart != winStart) {
-          winStart = newWinStart;
-          for(int slot = 0; slot < TM_ROWS_VIS; slot++) {
-            int idx = winStart + slot;
-            if(idx >= NUM_THEMES) break;
-            drawThemeMenuRow(idx, TM_ROW_Y0 + slot*TM_ROW_H, idx == sel);
+    if(dir == 0) {
+      // No direction held — reset scroll state
+      lastDir      = 0;
+      inRepeat     = false;
+      holdDownStart = 0;
+    } else {
+      if(dir != lastDir) {
+        // New direction: move immediately on first frame
+        lastDir       = dir;
+        inRepeat      = false;
+        holdDownStart = now;
+        // Immediate single step
+        uint8_t prevSel = sel;
+        if(dir == -1 && sel > 0)             sel--;
+        else if(dir == 1 && sel < NUM_THEMES-1) sel++;
+        lastScrollTime = now;
+
+        if(sel != prevSel) {
+          int newWin = (int)sel - TM_ROWS_VIS/2;
+          if(newWin < 0) newWin = 0;
+          if(newWin > NUM_THEMES - TM_ROWS_VIS) newWin = NUM_THEMES - TM_ROWS_VIS;
+          if(newWin < 0) newWin = 0;
+          if(newWin != winStart) {
+            winStart = newWin;
+            for(int s = 0; s < TM_ROWS_VIS; s++) {
+              int idx = winStart + s; if(idx >= NUM_THEMES) break;
+              drawThemeMenuRow(idx, TM_ROW_Y0 + s*TM_ROW_H, idx == sel);
+            }
+          } else {
+            int os = (int)prevSel - winStart, ns2 = (int)sel - winStart;
+            if(os >= 0 && os < TM_ROWS_VIS)
+              drawThemeMenuRow(prevSel, TM_ROW_Y0 + os*TM_ROW_H, false);
+            if(ns2 >= 0 && ns2 < TM_ROWS_VIS)
+              drawThemeMenuRow(sel,     TM_ROW_Y0 + ns2*TM_ROW_H, true);
           }
-        } else {
-          // Just repaint old and new highlighted row
-          int oldSlot = (int)prevSel - winStart;
-          int newSlot = (int)sel    - winStart;
-          if(oldSlot >= 0 && oldSlot < TM_ROWS_VIS)
-            drawThemeMenuRow(prevSel, TM_ROW_Y0 + oldSlot*TM_ROW_H, false);
-          if(newSlot >= 0 && newSlot < TM_ROWS_VIS)
-            drawThemeMenuRow(sel,     TM_ROW_Y0 + newSlot*TM_ROW_H, true);
+        }
+      } else {
+        // Same direction still held
+        unsigned long heldMs = now - holdDownStart;
+        if(!inRepeat && heldMs >= TM_REPEAT_INIT) {
+          inRepeat = true;
+          lastScrollTime = now;
+        }
+        if(inRepeat && (now - lastScrollTime) >= TM_REPEAT_FAST) {
+          lastScrollTime = now;
+          uint8_t prevSel = sel;
+          if(dir == -1 && sel > 0)              sel--;
+          else if(dir == 1 && sel < NUM_THEMES-1) sel++;
+
+          if(sel != prevSel) {
+            int newWin = (int)sel - TM_ROWS_VIS/2;
+            if(newWin < 0) newWin = 0;
+            if(newWin > NUM_THEMES - TM_ROWS_VIS) newWin = NUM_THEMES - TM_ROWS_VIS;
+            if(newWin < 0) newWin = 0;
+            if(newWin != winStart) {
+              winStart = newWin;
+              for(int s = 0; s < TM_ROWS_VIS; s++) {
+                int idx = winStart + s; if(idx >= NUM_THEMES) break;
+                drawThemeMenuRow(idx, TM_ROW_Y0 + s*TM_ROW_H, idx == sel);
+              }
+            } else {
+              int os = (int)prevSel - winStart, ns2 = (int)sel - winStart;
+              if(os >= 0 && os < TM_ROWS_VIS)
+                drawThemeMenuRow(prevSel, TM_ROW_Y0 + os*TM_ROW_H, false);
+              if(ns2 >= 0 && ns2 < TM_ROWS_VIS)
+                drawThemeMenuRow(sel,     TM_ROW_Y0 + ns2*TM_ROW_H, true);
+            }
+          }
         }
       }
     }
 
-    // Button: select this theme
+    // ── Button: select and apply theme ────────────────────────────────────
     if(pressed && !btnWas) {
       themeIndex   = sel;
       themeMenuSel = sel;
@@ -3801,7 +3877,7 @@ void showThemeMenu() {
       return;
     }
 
-    jWasU = jU; jWasD = jD; jWasL = jL; btnWas = pressed;
+    btnWas = pressed;
     yield(); delay(8);
   }
 }
