@@ -1,11 +1,13 @@
 /*
- * RageMate Valkyra Alpha V5
- * Memory optimisation: DRAM reduced by ~46 KB to fit ESP32 dram0_0_seg.
- *   - TT_SIZE 8192 → 4096  (-40 KB DRAM, primary fix)
- *   - AB_MAX_LEVELS / Q_MAX_LEVELS 12 → 8  (-3 KB DRAM)
- *   - MAX_HISTORY 200 → 100  (-2.4 KB DRAM)
- *   - All 7 PST tables moved to PROGMEM flash; reads via pgm_read_byte()
- * Engine quality: unchanged. All search features, evaluation, book, UI intact.
+ * RageMate Valkyra Alpha V6
+ * New: 37-theme colour selector (UI-5).
+ *   - Small palette button below UNDO in left panel (panelFocus 3, single-press)
+ *   - Full-screen scrollable theme menu with name + 3-swatch preview
+ *   - Back button (joystick left or button while on panel) returns to board
+ *   - Active theme colours applied to ALL screens via refreshTheme()
+ *   - Resets to WOOD (index 0) on doRestart()
+ *   - 4 special themes removed (HACKER, FIRE, HIGH CONTRAST, RAINBOW)
+ * V5 memory optimisations retained.
  */
 
 #include <Arduino.h>
@@ -32,41 +34,543 @@ Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_MOSI, TFT_SCLK, TFT_RS
 #define SQ_W       13
 #define SQ_H       13
 
-// ─── Color theme — MATRIX GREEN ─────────────────────────────────────────────
-// RGB565 green palette:
-//   0x07E0 = #00FF00 bright green
-//   0x03E0 = #007E00 mid green
-//   0x0300 = #006000 dark green
-//   0x0180 = #003000 very dark green
-//   0x0060 = #00C000 medium-bright
-//   0x0540 = #00A800 muted green
-//   0x0020 = #000400 near-black green tint (background)
-//   0x47E4 = #80FF80 pale green highlight
-//   0x27E4 = #40FF80 light-mid green
-//   0x4208 = #820010 (unused — avoid)
-//   0xF800 = red (danger only)
-//   0x8000 = dark red (danger shadow)
-//   0xFFFF = white (piece text / highlights)
-//   0xC618 = light gray
-//   0x8410 = mid gray
-//   0x4228 = dark gray
-//   0x0841 = near-black
+// ─── RGB565 helper ──────────────────────────────────────────────────────────
+#define C(r,g,b) ((uint16_t)(((uint16_t)(r)<<11)|((uint16_t)(g)<<5)|(uint16_t)(b)))
 
-#define C_BG               0x0020   // near-black green: #000400
-#define C_DARK_SQ          0x0180   // dark green sq: #003000
-#define C_LIGHT_SQ         0x0300   // mid-dark green sq: #006000
-#define C_BORDER           0x03A0   // medium green border
-#define C_HOVER            0x07E0   // bright #00FF00 hover cursor
-#define C_SEL              0x47E4   // pale green selection
-#define C_BOTH             0xFFFF   // white when sel+hover overlap
-#define C_DOT              0x03E0   // medium green legal dot
-#define C_LASTMOVE         0x0540   // muted green last-move outline
-#define C_CURSOR_LASTMOVE  0x27E4   // light-mid green cursor on last-move sq
-#define C_GAMEOVER         0x07E0   // bright green game-over text
-#define C_BTN_BG           0x0180   // dark green button bg
-#define C_BTN_HL           0x03E0   // mid green button highlight
-#define C_PB_EMPTY         0x0140   // dark forest green — bar frame always visible
-#define C_PB_BORDER        0x03E0   // green progress bar border
+// ─── Theme struct ────────────────────────────────────────────────────────────
+// Each theme supplies every colour used by every screen so that a single call
+// to refreshTheme() updates ALL active colour variables at once.
+struct Theme {
+  const char* name;
+  // Board
+  uint16_t bg, darkSq, lightSq, border, cursor, label;
+  uint16_t wFill, wTxt, bFill, bTxt;
+  // Selection / legal dots / last-move
+  uint16_t sel, dot, lastMove, cursorLastMove;
+  // Buttons / panel
+  uint16_t btnBg, btnHl, pbEmpty, pbBorder;
+  // Game-over text colour
+  uint16_t gameOver;
+  // Lose / resign / checkmate screens
+  uint16_t lBg, lGrid, lAccent, lAccent2, lTitle, lSub, lCrown, lCrownHi;
+  // Keypad
+  uint16_t kBg, kHdr, kHdrTxt, kKey, kKeyBdr, kKeyTxt, kSelKey, kSelBdr, kConfirm, kDigBdr, kDigTxt;
+  // Intro
+  uint16_t iBg, iBox, iBoxBdr, iTitle, iTitle2, iSub, iPrompt;
+};
+
+// ─── 37-theme table (PROGMEM) ────────────────────────────────────────────────
+// Removed: HACKER(08), FIRE(38), HIGH CONTRAST(39), RAINBOW(40)
+// All colours are RGB565 via C(r,g,b).
+// Field order: name | bg darkSq lightSq border cursor label |
+//              wFill wTxt bFill bTxt | sel dot lastMove cursorLastMove |
+//              btnBg btnHl pbEmpty pbBorder | gameOver |
+//              lBg lGrid lAccent lAccent2 lTitle lSub lCrown lCrownHi |
+//              kBg kHdr kHdrTxt kKey kKeyBdr kKeyTxt kSelKey kSelBdr kConfirm kDigBdr kDigTxt |
+//              iBg iBox iBoxBdr iTitle iTitle2 iSub iPrompt
+const Theme themes[] PROGMEM = {
+
+// 00 WOOD
+{ "WOOD",
+  C( 5, 6, 1),C(12,16, 3),C(27,44,14),C(20,26, 5),C(31,46, 0),C(22,34, 8),
+  C(29,50,18),C( 4, 5, 1),C( 8,10, 2),C(26,42,13),
+  C(31,54,10),C(24,36, 9),C(18,24, 5),C(27,40,10),
+  C(12,16, 3),C(20,26, 5),C( 8,12, 2),C(18,24, 5),
+  C(31,46, 0),
+  C( 5, 6, 1),C( 8,10, 2),C(20,26, 5),C(12,16, 3),C(28,44,14),C(22,36, 9),C(16,22, 4),C(28,48,16),
+  C( 5, 6, 1),C(12,16, 3),C(31,46, 0),C( 8,10, 2),C(16,22, 4),C(24,38,12),C(20,26, 5),C(28,40,12),C(16,22, 4),C(20,28, 6),C(28,44,14),
+  C( 5, 6, 1),C(10,14, 3),C(18,24, 5),C(31,46, 0),C(28,44,14),C(20,30, 7),C(24,38,12) },
+
+// 01 CERAMIC
+{ "CERAMIC",
+  C(22,42,26),C(10,22,24),C(27,54,30),C( 8,20,22),C( 0,30,28),C(10,24,26),
+  C(29,58,31),C( 4,10,12),C( 6,14,18),C(28,56,30),
+  C( 0,40,30),C( 0,28,26),C( 8,18,22),C( 0,36,28),
+  C( 8,18,22),C(12,26,28),C( 6,14,18),C(10,22,24),
+  C( 0,30,28),
+  C(22,42,26),C( 6,14,18),C( 8,20,22),C(10,22,24),C(27,54,30),C( 0,30,28),C( 8,18,22),C(28,56,30),
+  C(22,42,26),C( 8,18,22),C( 0,30,28),C(10,22,24),C(14,30,30),C(20,44,28),C( 8,18,22),C( 0,30,28),C(10,20,22),C(14,28,28),C(22,46,28),
+  C(22,42,26),C(10,22,24),C( 8,18,22),C( 0,30,28),C(20,44,28),C(14,30,28),C( 0,24,26) },
+
+// 02 STONE
+{ "STONE",
+  C( 6, 8, 7),C(12,14,12),C(24,30,18),C(16,18,14),C(28,36, 4),C(18,22,14),
+  C(26,34,20),C( 3, 4, 3),C( 8,10, 8),C(24,30,18),
+  C(28,40, 6),C(22,28,12),C(14,16,12),C(26,32,14),
+  C(12,14,12),C(16,20,14),C( 8,10, 8),C(14,18,12),
+  C(28,36, 4),
+  C( 6, 8, 7),C( 8,10, 8),C(14,16,12),C(12,14,12),C(24,30,18),C(18,22,12),C(12,14,12),C(26,32,18),
+  C( 6, 8, 7),C(12,14,12),C(28,36, 4),C(10,12,10),C(16,20,14),C(22,28,16),C(14,18,12),C(20,26,14),C(12,14,12),C(18,22,14),C(24,30,18),
+  C( 6, 8, 7),C(14,18,12),C(10,12,10),C(28,36, 4),C(24,30,18),C(16,20,12),C(20,26,14) },
+
+// 03 MEDIEVAL
+{ "MEDIEVAL",
+  C( 6, 7, 2),C(11,13, 4),C(25,40,12),C(22,24, 4),C(30,38, 0),C(20,28, 6),
+  C(28,46,14),C( 4, 5, 1),C( 7, 9, 2),C(26,40,12),
+  C(30,44, 4),C(22,32, 8),C(16,20, 4),C(28,40,10),
+  C(11,13, 4),C(18,22, 5),C( 7, 9, 2),C(14,18, 4),
+  C(30,38, 0),
+  C( 6, 7, 2),C( 7, 9, 2),C(18,20, 4),C(11,13, 4),C(25,40,12),C(22,30, 6),C(11,14, 3),C(28,44,13),
+  C( 6, 7, 2),C(11,13, 4),C(30,38, 0),C( 9,11, 3),C(16,20, 4),C(24,36,10),C(14,18, 4),C(22,28, 6),C( 9,11, 3),C(16,22, 5),C(25,40,12),
+  C( 6, 7, 2),C(12,16, 4),C( 9,11, 3),C(30,38, 0),C(25,40,12),C(18,26, 6),C(22,34,10) },
+
+// 04 BAR
+{ "BAR",
+  C( 3, 5, 1),C( 4,14, 2),C( 8,28, 6),C(16,20, 4),C(31,62,31),C(10,26, 6),
+  C(26,44,10),C( 1, 2, 0),C( 2, 8, 1),C(22,40, 8),
+  C(20,50,12),C(10,28, 6),C( 8,18, 4),C(16,36, 8),
+  C( 4,14, 2),C( 8,20, 5),C( 2, 8, 1),C( 6,16, 4),
+  C(31,62,31),
+  C( 3, 5, 1),C( 2, 8, 1),C( 8,18, 4),C( 4,14, 2),C( 8,28, 6),C(31,62,31),C( 4,14, 2),C(20,36, 8),
+  C( 3, 5, 1),C( 4,14, 2),C(31,62,31),C( 4,12, 2),C( 8,20, 5),C(20,36, 8),C( 8,20, 5),C(16,30, 7),C( 4,12, 2),C( 8,22, 5),C(16,40, 9),
+  C( 3, 5, 1),C( 6,18, 4),C( 4,12, 2),C(31,62,31),C(16,40, 9),C(10,28, 6),C(20,40,10) },
+
+// 05 CLUB
+{ "CLUB",
+  C( 5, 2, 2),C(14, 4, 5),C(26,36,14),C(24,22, 2),C(28,26, 2),C(22,20, 4),
+  C(28,42,16),C( 4, 2, 1),C( 8, 2, 3),C(26,36,14),
+  C(30,30, 4),C(22,22, 4),C(16, 8, 4),C(26,26, 4),
+  C(14, 4, 5),C(18,14, 3),C( 8, 2, 3),C(12, 6, 4),
+  C(28,26, 2),
+  C( 5, 2, 2),C( 8, 2, 3),C(18,10, 4),C(14, 4, 5),C(26,36,14),C(28,26, 2),C(10, 3, 4),C(28,30,10),
+  C( 5, 2, 2),C(14, 4, 5),C(28,26, 2),C(10, 3, 4),C(18,14, 3),C(24,32,12),C(16, 8, 4),C(22,18, 4),C(10, 3, 4),C(16,10, 4),C(24,32,12),
+  C( 5, 2, 2),C(14,10, 4),C(10, 3, 4),C(28,26, 2),C(24,32,12),C(18,18, 4),C(22,22, 4) },
+
+// 06 DISCO
+{ "DISCO",
+  C( 4, 2, 8),C(10, 4,18),C(24,24,28),C(28, 8,22),C(31,10,26),C(22, 8,20),
+  C(28,28,30),C( 4, 2, 8),C( 6, 2,14),C(28,10,24),
+  C(31,16,28),C(24,10,22),C(18, 6,20),C(28,14,26),
+  C(10, 4,18),C(18, 8,22),C( 6, 2,14),C(12, 4,18),
+  C(31,10,26),
+  C( 4, 2, 8),C( 6, 2,14),C(22, 6,20),C(10, 4,18),C(24,24,28),C(31,10,26),C( 8, 3,16),C(28,20,28),
+  C( 4, 2, 8),C(10, 4,18),C(31,10,26),C( 8, 3,16),C(18, 8,22),C(24,20,26),C(16, 6,22),C(22,10,24),C( 8, 3,16),C(16, 8,22),C(24,24,28),
+  C( 4, 2, 8),C(12, 6,20),C( 8, 3,16),C(31,10,26),C(24,24,28),C(18,10,22),C(20,12,24) },
+
+// 07 CYBERPUNK
+{ "CYBERPUNK",
+  C( 1, 0, 2),C( 6, 2,10),C(12, 4,18),C( 0,44,28),C( 0,48,28),C( 0,38,22),
+  C(28, 4,22),C(31,62,31),C( 2,16,16),C(31, 8,28),
+  C( 0,52,30),C( 0,40,26),C( 6, 2,10),C( 0,46,28),
+  C( 6, 2,10),C(18, 4,20),C( 4, 2, 8),C( 8, 2,12),
+  C( 0,48,28),
+  C( 1, 0, 2),C( 4, 2, 8),C(14, 2,14),C( 6, 2,10),C(12, 4,18),C( 0,48,28),C( 4, 2, 8),C(31, 8,28),
+  C( 1, 0, 2),C( 6, 2,10),C( 0,48,28),C( 6, 2,10),C(18, 4,20),C(26, 6,26),C(14, 4,16),C(20, 4,22),C( 6, 2,10),C(12, 4,18),C(31, 8,28),
+  C( 1, 0, 2),C( 8, 2,12),C( 4, 2,10),C( 0,48,28),C(31, 8,28),C(18, 4,20),C( 0,40,26) },
+
+// 08 DARK MODE
+{ "DARK MODE",
+  C( 1, 2, 3),C( 4, 8,10),C( 9,18,20),C( 8,14,18),C( 0,44,31),C(10,20,24),
+  C(14,24,28),C(31,62,31),C( 3, 6, 8),C(10,22,28),
+  C( 0,48,31),C( 0,36,28),C( 6,12,16),C( 0,42,30),
+  C( 4, 8,10),C(10,20,24),C( 3, 6, 8),C( 6,12,16),
+  C( 0,44,31),
+  C( 1, 2, 3),C( 3, 6, 8),C(10,16,20),C( 4, 8,10),C( 9,18,20),C( 0,44,31),C( 3, 6, 8),C(14,28,31),
+  C( 1, 2, 4),C( 5,10,14),C( 0,44,31),C( 4, 8,12),C(10,20,24),C(14,28,31),C( 8,18,22),C(12,24,26),C( 4, 8,12),C(10,24,28),C(14,38,31),
+  C( 1, 2, 4),C( 6,14,20),C( 3, 8,12),C( 0,44,31),C(14,38,31),C(10,26,28),C( 0,32,26) },
+
+// 09 AUTUMN
+{ "AUTUMN",
+  C( 6, 4, 1),C(18, 8, 1),C(29,40, 2),C(24,18, 2),C(31,52, 0),C(26,28, 2),
+  C(30,46, 4),C( 4, 2, 0),C(12, 5, 1),C(29,42, 3),
+  C(31,56, 2),C(26,30, 2),C(20,12, 2),C(28,42, 2),
+  C(18, 8, 1),C(22,16, 2),C(10, 4, 1),C(16,10, 2),
+  C(31,52, 0),
+  C( 6, 4, 1),C(12, 5, 1),C(20,12, 2),C(18, 8, 1),C(29,40, 2),C(31,52, 0),C(14, 6, 1),C(28,38, 3),
+  C( 6, 4, 1),C(18, 8, 1),C(31,52, 0),C(14, 6, 1),C(22,16, 2),C(28,38, 3),C(18,10, 1),C(24,22, 2),C(14, 6, 1),C(20,16, 2),C(28,42, 3),
+  C( 6, 4, 1),C(16,10, 2),C(12, 6, 1),C(31,52, 0),C(28,42, 3),C(22,26, 2),C(26,36, 3) },
+
+// 10 SPRING
+{ "SPRING",
+  C(22,28,14),C( 6,18, 6),C(30,24,24),C( 8,24, 8),C(22,14,14),C( 8,22, 8),
+  C(31,28,26),C( 3, 8, 3),C( 4,12, 4),C(30,22,22),
+  C(28,18,16),C(14,22,12),C( 6,18, 6),C(24,18,16),
+  C( 6,18, 6),C(10,22,10),C( 4,12, 4),C( 6,16, 6),
+  C(22,14,14),
+  C(22,28,14),C( 4,12, 4),C( 8,20, 8),C( 6,18, 6),C(30,24,24),C(22,14,14),C( 6,16, 6),C(20,32,18),
+  C(22,28,14),C( 6,18, 6),C(22,14,14),C( 6,16, 6),C(10,22,10),C(20,32,18),C(10,22,10),C(16,28,14),C( 6,16, 6),C(10,24,12),C(22,34,18),
+  C(22,28,14),C(10,22,10),C( 6,16, 6),C(22,14,14),C(28,24,24),C(14,26,14),C(16,28,14) },
+
+// 11 TOURNAMENT
+{ "TOURNAMENT",
+  C( 0, 2, 8),C( 2, 6,18),C(28,46,20),C(28,44, 0),C(31,52, 0),C(24,40, 0),
+  C(30,50,22),C( 0, 3,10),C( 1, 4,14),C(28,46, 0),
+  C(31,56, 2),C(24,42, 0),C(16,24, 0),C(28,48, 0),
+  C( 2, 6,18),C(18,28, 0),C( 1, 4,14),C( 4,10,16),
+  C(31,52, 0),
+  C( 0, 2, 8),C( 1, 4,14),C(14,20, 0),C( 2, 6,18),C(28,46,20),C(31,52, 0),C( 2, 6,16),C(26,42, 0),
+  C( 0, 2, 8),C( 2, 6,18),C(31,52, 0),C( 2, 6,16),C(18,28, 0),C(26,42, 0),C( 4,12,24),C(12,22, 0),C( 2, 6,16),C(16,26, 0),C(28,46,20),
+  C( 0, 2, 8),C( 4,10,16),C( 2, 4,16),C(31,52, 0),C(26,42, 0),C(18,30, 0),C(22,36, 0) },
+
+// 12 ROYAL
+{ "ROYAL",
+  C( 4, 1, 8),C( 9, 3,18),C(22,28, 8),C(28,44, 0),C(31,50, 0),C(22,34, 0),
+  C(26,36,10),C( 3, 1, 6),C( 5, 2,12),C(26,34, 6),
+  C(31,54, 2),C(24,36, 0),C(14, 6,22),C(28,46, 0),
+  C( 9, 3,18),C(18,24, 0),C( 5, 2,12),C( 8, 4,16),
+  C(31,50, 0),
+  C( 4, 1, 8),C( 5, 2,12),C(16, 8,22),C( 9, 3,18),C(22,28, 8),C(31,50, 0),C( 7, 3,16),C(24,34, 6),
+  C( 4, 1, 8),C( 9, 3,18),C(31,50, 0),C( 7, 2,14),C(18,24, 0),C(24,34, 6),C(12,10,22),C(20,18,26),C( 7, 2,14),C(12,10,22),C(22,28, 8),
+  C( 4, 1, 8),C(10, 6,18),C( 7, 2,14),C(31,50, 0),C(24,34, 6),C(18,22, 0),C(20,26, 2) },
+
+// 13 MARBLE
+{ "MARBLE",
+  C(20,24,22),C( 2, 2, 2),C(30,60,30),C(16,20,18),C(22,28,20),C(14,18,16),
+  C(31,62,31),C( 2, 2, 2),C( 2, 2, 2),C(30,60,30),
+  C(28,32,24),C(18,22,18),C( 8, 8, 8),C(24,28,22),
+  C( 6, 6, 6),C(16,20,18),C( 2, 2, 2),C( 8, 8, 8),
+  C(22,28,20),
+  C(20,24,22),C( 2, 2, 2),C( 8, 8, 8),C( 6, 6, 6),C(30,60,30),C(22,28,20),C( 6, 6, 6),C(26,52,26),
+  C(20,24,22),C( 6, 6, 6),C(22,28,20),C( 8, 8, 8),C(16,20,18),C(26,52,26),C(12,14,12),C(18,20,16),C( 8, 8, 8),C(14,16,14),C(28,56,28),
+  C(20,24,22),C(14,18,14),C( 8, 8, 8),C(22,28,20),C(28,56,28),C(16,20,16),C(18,24,18) },
+
+// 14 NEON
+{ "NEON",
+  C( 0, 0, 1),C( 8, 0,14),C(18, 2,26),C(31,10,24),C( 0,56,28),C(24, 8,22),
+  C(22, 2,28),C(31,62,31),C( 2,18,20),C(31,10,24),
+  C( 0,60,30),C( 0,44,24),C(12, 2,18),C( 0,52,28),
+  C( 8, 0,14),C(18, 4,22),C( 4, 0, 8),C( 6, 0,12),
+  C( 0,56,28),
+  C( 0, 0, 1),C( 4, 0, 8),C(14, 2,20),C( 8, 0,14),C(18, 2,26),C( 0,56,28),C( 6, 0,12),C(31,10,24),
+  C( 0, 0, 1),C( 8, 0,14),C( 0,56,28),C( 6, 0,12),C(18, 4,22),C(24, 6,26),C(14, 2,22),C(20, 4,24),C( 6, 0,12),C(14, 2,22),C(18, 2,26),
+  C( 0, 0, 1),C( 8, 2,14),C( 6, 0,12),C( 0,56,28),C(31,10,24),C(16, 4,22),C( 0,44,26) },
+
+// 15 LAVA
+{ "LAVA",
+  C( 2, 1, 0),C( 8, 3, 0),C(22,12, 0),C(28,18, 0),C(31,24, 0),C(24,16, 0),
+  C(26,16, 0),C(31,62,20),C( 5, 2, 0),C(28,22, 0),
+  C(31,28, 0),C(24,18, 0),C(14, 6, 0),C(28,22, 0),
+  C( 8, 3, 0),C(18,10, 0),C( 5, 2, 0),C( 8, 4, 0),
+  C(31,24, 0),
+  C( 2, 1, 0),C( 5, 2, 0),C(14, 6, 0),C( 8, 3, 0),C(22,12, 0),C(31,24, 0),C( 6, 3, 0),C(26,18, 0),
+  C( 2, 1, 0),C( 8, 3, 0),C(31,24, 0),C( 6, 3, 0),C(18,10, 0),C(26,18, 0),C(14, 8, 0),C(20,12, 0),C( 6, 3, 0),C(12, 6, 0),C(22,12, 0),
+  C( 2, 1, 0),C( 8, 4, 0),C( 6, 3, 0),C(31,24, 0),C(26,18, 0),C(18,10, 0),C(22,14, 0) },
+
+// 16 OCEAN
+{ "OCEAN",
+  C( 0, 4, 8),C( 0, 8,16),C( 4,30,28),C( 0,32,26),C( 0,50,30),C( 2,26,24),
+  C( 6,36,30),C( 0, 3, 6),C( 0, 6,14),C( 6,34,28),
+  C( 0,54,31),C( 0,40,28),C( 0,14,20),C( 0,48,30),
+  C( 0, 8,16),C( 0,24,22),C( 0, 6,14),C( 0,12,18),
+  C( 0,50,30),
+  C( 0, 4, 8),C( 0, 6,14),C( 0,14,22),C( 0, 8,16),C( 4,30,28),C( 0,50,30),C( 0, 8,14),C( 4,32,28),
+  C( 0, 4, 8),C( 0, 8,16),C( 0,50,30),C( 0, 8,14),C( 0,24,22),C( 4,32,28),C( 0,16,20),C( 0,28,26),C( 0, 8,14),C( 0,14,20),C( 4,30,28),
+  C( 0, 4, 8),C( 0,12,18),C( 0, 8,14),C( 0,50,30),C( 4,32,28),C( 0,28,26),C( 0,22,22) },
+
+// 17 FOREST
+{ "FOREST",
+  C( 1, 4, 1),C( 2, 8, 2),C(14,30, 6),C( 8,22, 4),C(28,38, 2),C( 8,20, 4),
+  C(18,34, 8),C( 0, 2, 0),C( 1, 6, 1),C(16,32, 6),
+  C(30,42, 4),C(20,28, 4),C( 4,12, 2),C(26,36, 4),
+  C( 2, 8, 2),C( 6,16, 3),C( 1, 6, 1),C( 2, 6, 2),
+  C(28,38, 2),
+  C( 1, 4, 1),C( 1, 6, 1),C( 4,12, 2),C( 2, 8, 2),C(14,30, 6),C(28,38, 2),C( 2, 6, 1),C(14,28, 6),
+  C( 1, 4, 1),C( 2, 8, 2),C(28,38, 2),C( 2, 6, 1),C( 6,16, 3),C(14,28, 6),C( 6,16, 3),C(10,22, 4),C( 2, 6, 1),C( 4,12, 2),C(14,30, 6),
+  C( 1, 4, 1),C( 4,10, 2),C( 2, 6, 1),C(28,38, 2),C(14,30, 6),C( 8,20, 4),C(12,24, 5) },
+
+// 18 DESERT
+{ "DESERT",
+  C( 8,10, 2),C(18,20, 4),C(28,40,10),C(26,24, 4),C(31,36, 0),C(24,26, 4),
+  C(30,46,12),C( 4, 5, 1),C(12,14, 2),C(28,42,10),
+  C(31,40, 2),C(24,28, 6),C(18,18, 3),C(28,34, 4),
+  C(18,20, 4),C(22,24, 4),C(12,14, 2),C(16,18, 3),
+  C(31,36, 0),
+  C( 8,10, 2),C(12,14, 2),C(18,18, 3),C(18,20, 4),C(28,40,10),C(31,36, 0),C(14,16, 3),C(26,38, 8),
+  C( 8,10, 2),C(18,20, 4),C(31,36, 0),C(14,16, 3),C(22,24, 4),C(26,38, 8),C(18,20, 4),C(22,26, 5),C(14,16, 3),C(18,20, 4),C(28,40,10),
+  C( 8,10, 2),C(16,18, 3),C(14,16, 3),C(31,36, 0),C(26,38, 8),C(20,24, 4),C(22,28, 5) },
+
+// 19 MIDNIGHT
+{ "MIDNIGHT",
+  C( 0, 1, 6),C( 2, 4,14),C( 6,10,22),C( 8,18,28),C(28,56,31),C( 8,18,26),
+  C(12,22,30),C(28,56,31),C( 1, 3,10),C(16,34,31),
+  C(28,60,31),C(20,40,30),C( 4, 8,18),C(24,52,31),
+  C( 2, 4,14),C( 6,14,24),C( 1, 3,10),C( 4, 8,16),
+  C(28,56,31),
+  C( 0, 1, 6),C( 1, 3,10),C( 6, 8,18),C( 2, 4,14),C( 6,10,22),C(28,56,31),C( 2, 6,16),C(14,30,31),
+  C( 0, 1, 6),C( 2, 4,14),C(28,56,31),C( 2, 4,12),C( 6,14,24),C(14,30,31),C( 6,14,24),C(10,22,28),C( 2, 4,12),C( 4,10,20),C( 6,10,22),
+  C( 0, 1, 6),C( 4, 8,16),C( 2, 4,12),C(28,56,31),C(14,30,31),C(10,20,28),C(12,24,30) },
+
+// 20 ROSE
+{ "ROSE",
+  C( 8, 4, 5),C(18, 8,10),C(28,42,24),C(24,14,14),C(28,16,16),C(22,12,12),
+  C(30,48,26),C( 6, 3, 4),C(12, 5, 7),C(28,40,22),
+  C(30,20,18),C(22,16,14),C(16, 8,10),C(26,18,16),
+  C(18, 8,10),C(20,12,12),C(12, 5, 7),C(14, 6, 8),
+  C(28,16,16),
+  C( 8, 4, 5),C(12, 5, 7),C(16, 8,10),C(18, 8,10),C(28,42,24),C(28,16,16),C(14, 6, 8),C(26,38,20),
+  C( 8, 4, 5),C(18, 8,10),C(28,16,16),C(14, 6, 8),C(20,12,12),C(26,38,20),C(18,12,12),C(22,14,14),C(14, 6, 8),C(18,12,12),C(26,38,20),
+  C( 8, 4, 5),C(14, 8,10),C(12, 5, 7),C(28,16,16),C(26,38,20),C(18,14,12),C(20,16,14) },
+
+// 21 STEAMPUNK
+{ "STEAMPUNK",
+  C( 4, 4, 2),C(10,10, 3),C(22,18, 4),C(24,20, 2),C(28,56,28),C(20,18, 4),
+  C(26,22, 4),C( 2, 2, 1),C( 7, 7, 2),C(24,20, 4),
+  C(28,58,28),C(20,20, 4),C(12,10, 3),C(24,22, 4),
+  C(10,10, 3),C(16,14, 3),C( 7, 7, 2),C(10, 8, 3),
+  C(28,56,28),
+  C( 4, 4, 2),C( 7, 7, 2),C(12,10, 3),C(10,10, 3),C(22,18, 4),C(28,56,28),C( 8, 8, 2),C(22,18, 4),
+  C( 4, 4, 2),C(10,10, 3),C(28,56,28),C( 8, 8, 2),C(16,14, 3),C(22,18, 4),C(14,12, 3),C(18,16, 4),C( 8, 8, 2),C(12,10, 3),C(22,18, 4),
+  C( 4, 4, 2),C(12,10, 3),C( 8, 8, 2),C(28,56,28),C(22,18, 4),C(16,14, 3),C(18,16, 4) },
+
+// 22 VAMPIRE
+{ "VAMPIRE",
+  C( 2, 0, 0),C( 6, 0, 0),C(26,22,20),C(22, 2, 2),C(28, 4, 4),C(20, 2, 2),
+  C(28,26,24),C( 4, 0, 0),C( 4, 0, 0),C(26,22,20),
+  C(30, 8, 6),C(22,18,16),C( 8, 1, 1),C(26, 6, 4),
+  C( 6, 0, 0),C(14, 2, 2),C( 4, 0, 0),C( 6, 0, 0),
+  C(28, 4, 4),
+  C( 2, 0, 0),C( 4, 0, 0),C( 8, 1, 1),C( 6, 0, 0),C(26,22,20),C(28, 4, 4),C( 4, 0, 0),C(24,20,18),
+  C( 2, 0, 0),C( 6, 0, 0),C(28, 4, 4),C( 4, 0, 0),C(14, 2, 2),C(24, 4, 4),C(10, 1, 1),C(16, 2, 2),C( 4, 0, 0),C( 8, 1, 1),C(22,20,18),
+  C( 2, 0, 0),C( 8, 2, 2),C( 4, 0, 0),C(28, 4, 4),C(22,20,18),C(16, 2, 2),C(18, 4, 4) },
+
+// 23 ARCADE
+{ "ARCADE",
+  C( 0, 0, 0),C( 2, 6, 0),C( 6,20, 0),C(12,40, 0),C(16,52, 0),C( 8,32, 0),
+  C( 8,28, 0),C(31,62,31),C( 1, 4, 0),C(10,36, 0),
+  C(16,56, 0),C(12,40, 0),C( 4,14, 0),C(14,48, 0),
+  C( 2, 6, 0),C( 6,22, 0),C( 1, 4, 0),C( 2, 8, 0),
+  C(16,52, 0),
+  C( 0, 0, 0),C( 1, 4, 0),C( 4,14, 0),C( 2, 6, 0),C( 6,20, 0),C(16,52, 0),C( 2, 6, 0),C(10,36, 0),
+  C( 0, 0, 0),C( 2, 6, 0),C(16,52, 0),C( 2, 6, 0),C( 6,22, 0),C(10,36, 0),C( 6,22, 0),C(10,32, 0),C( 2, 6, 0),C( 4,14, 0),C( 6,20, 0),
+  C( 0, 0, 0),C( 4, 8, 0),C( 2, 6, 0),C(16,52, 0),C(10,36, 0),C( 6,22, 0),C( 8,28, 0) },
+
+// 24 GRAFFITI
+{ "GRAFFITI",
+  C( 6, 6, 6),C(10,10,10),C(20,20,18),C(28,22, 0),C( 0,28,30),C(24,18, 0),
+  C(22,22,20),C( 2, 2, 2),C( 8, 8, 8),C(28,22, 0),
+  C( 0,34,30),C( 0,26,28),C(10,10,10),C( 0,30,28),
+  C(10,10,10),C(16,16,14),C( 8, 8, 8),C(10,10,10),
+  C( 0,28,30),
+  C( 6, 6, 6),C( 8, 8, 8),C(12,12,12),C(10,10,10),C(20,20,18),C( 0,28,30),C( 8, 8, 8),C(22,22,20),
+  C( 6, 6, 6),C(10,10,10),C( 0,28,30),C( 8, 8, 8),C(16,16,14),C(22,22,20),C(12,12,12),C(16,16,14),C( 8, 8, 8),C(10,10,10),C(20,20,18),
+  C( 6, 6, 6),C(12,12,12),C( 8, 8, 8),C( 0,28,30),C(20,20,18),C(14,14,14),C(16,16,14) },
+
+// 25 NORDIC
+{ "NORDIC",
+  C( 2, 6,12),C( 4,10,18),C(24,46,50),C( 8,20,28),C(28,54,58),C( 8,22,30),
+  C(26,50,54),C( 2, 6,10),C( 3, 8,16),C(22,44,48),
+  C(28,56,58),C(22,44,48),C( 4,12,20),C(26,52,54),
+  C( 4,10,18),C( 8,18,26),C( 3, 8,16),C( 4,10,18),
+  C(28,54,58),
+  C( 2, 6,12),C( 3, 8,14),C( 6,12,22),C( 4,10,18),C(24,46,50),C(28,54,58),C( 4,10,18),C(22,44,48),
+  C( 2, 6,12),C( 4,10,18),C(28,54,58),C( 4,10,18),C( 8,18,26),C(22,44,48),C( 8,18,26),C(14,26,34),C( 4,10,18),C( 6,14,22),C(24,46,50),
+  C( 2, 6,12),C( 6,12,20),C( 4,10,18),C(28,54,58),C(22,44,48),C(12,24,32),C(14,26,34) },
+
+// 26 SAHARA
+{ "SAHARA",
+  C( 7, 6, 2),C(16,14, 2),C(28,34, 4),C(26,22, 2),C(31,46, 0),C(24,22, 2),
+  C(30,38, 6),C( 4, 3, 0),C(10, 9, 1),C(28,34, 4),
+  C(31,50, 2),C(24,24, 2),C(18,16, 2),C(28,34, 4),
+  C(16,14, 2),C(20,18, 2),C(10, 9, 1),C(14,12, 2),
+  C(31,46, 0),
+  C( 7, 6, 2),C(10, 9, 1),C(16,14, 2),C(16,14, 2),C(28,34, 4),C(31,46, 0),C(12,10, 2),C(26,30, 4),
+  C( 7, 6, 2),C(16,14, 2),C(31,46, 0),C(12,10, 2),C(20,18, 2),C(26,30, 4),C(16,14, 2),C(22,20, 2),C(12,10, 2),C(16,14, 2),C(28,34, 4),
+  C( 7, 6, 2),C(14,12, 2),C(12,10, 2),C(31,46, 0),C(26,30, 4),C(20,20, 2),C(22,22, 2) },
+
+// 27 VOID
+{ "VOID",
+  C( 0, 0, 0),C( 2, 2, 2),C(28,28,28),C(14,14,14),C(31,62,31),C(14,14,14),
+  C(30,30,30),C( 0, 0, 0),C( 2, 2, 2),C(28,28,28),
+  C(28,32,28),C(18,18,18),C( 6, 6, 6),C(24,24,24),
+  C( 4, 4, 4),C(12,12,12),C( 2, 2, 2),C( 4, 4, 4),
+  C(31,62,31),
+  C( 0, 0, 0),C( 2, 2, 2),C( 6, 6, 6),C( 4, 4, 4),C(28,28,28),C(31,62,31),C( 4, 4, 4),C(24,24,24),
+  C( 0, 0, 0),C( 4, 4, 4),C(31,62,31),C( 4, 4, 4),C(12,12,12),C(24,24,24),C(10,10,10),C(14,14,14),C( 4, 4, 4),C( 6, 6, 6),C(24,24,24),
+  C( 0, 0, 0),C( 6, 6, 6),C( 4, 4, 4),C(31,62,31),C(24,24,24),C(14,14,14),C(16,16,16) },
+
+// 28 CORAL REEF
+{ "CORAL REEF",
+  C( 2,10,10),C( 4,16,16),C(28,36,22),C( 0,32,28),C(28,18, 6),C( 0,28,24),
+  C(30,40,24),C( 2, 6, 6),C( 2,10,12),C(28,36,22),
+  C(30,22, 8),C(22,30,18),C( 4,16,16),C(26,20, 8),
+  C( 4,16,16),C( 0,24,22),C( 2,10,12),C( 4,14,14),
+  C(28,18, 6),
+  C( 2,10,10),C( 2,10,12),C( 4,16,16),C( 4,16,16),C(28,36,22),C(28,18, 6),C( 4,14,14),C(26,34,20),
+  C( 2,10,10),C( 4,16,16),C(28,18, 6),C( 4,14,14),C( 0,24,22),C(26,34,20),C( 0,20,20),C( 0,26,24),C( 4,14,14),C( 0,18,18),C(28,36,22),
+  C( 2,10,10),C( 4,12,14),C( 3,12,12),C(28,18, 6),C(26,34,20),C( 0,24,22),C( 4,22,20) },
+
+// 29 NOIR
+{ "NOIR",
+  C( 3, 4, 2),C( 8, 9, 6),C(22,24,18),C(16,18,13),C(28,30,22),C(14,16,11),
+  C(24,26,20),C( 2, 2, 1),C( 5, 6, 4),C(22,24,18),
+  C(28,32,22),C(20,22,16),C( 8, 9, 6),C(24,26,18),
+  C( 8, 9, 6),C(12,14,10),C( 5, 6, 4),C( 8, 8, 6),
+  C(28,30,22),
+  C( 3, 4, 2),C( 5, 6, 4),C( 8, 9, 6),C( 8, 9, 6),C(22,24,18),C(28,30,22),C( 6, 7, 5),C(20,22,16),
+  C( 3, 4, 2),C( 8, 9, 6),C(28,30,22),C( 6, 7, 5),C(12,14,10),C(22,24,18),C(10,12, 8),C(14,16,12),C( 6, 7, 5),C( 8, 9, 6),C(22,24,18),
+  C( 3, 4, 2),C(10,12, 8),C( 6, 7, 5),C(28,30,22),C(22,24,18),C(14,16,12),C(16,18,13) },
+
+// 30 EMBER
+{ "EMBER",
+  C( 3, 2, 1),C( 8, 6, 4),C(20,12, 4),C(24,14, 4),C(31,20, 4),C(20,12, 3),
+  C(24,16, 4),C(31,62,31),C( 6, 4, 2),C(22,14, 4),
+  C(31,24, 4),C(22,14, 4),C( 8, 6, 4),C(28,18, 4),
+  C( 8, 6, 4),C(14,10, 4),C( 6, 4, 2),C( 8, 6, 4),
+  C(31,20, 4),
+  C( 3, 2, 1),C( 6, 4, 2),C( 8, 6, 4),C( 8, 6, 4),C(20,12, 4),C(31,20, 4),C( 6, 4, 2),C(20,14, 4),
+  C( 3, 2, 1),C( 8, 6, 4),C(31,20, 4),C( 6, 4, 2),C(14,10, 4),C(22,16, 4),C(12, 8, 3),C(16,10, 4),C( 6, 4, 2),C( 8, 6, 4),C(20,12, 4),
+  C( 3, 2, 1),C( 8, 6, 4),C( 6, 4, 2),C(31,20, 4),C(20,14, 4),C(14,10, 4),C(16,12, 4) },
+
+// 31 NEON JUNGLE
+{ "NEON JUNGLE",
+  C( 0, 2, 0),C( 2,10, 2),C( 6,26, 4),C(24, 2,20),C(28, 4,24),C(18, 2,16),
+  C(10,34, 6),C( 0, 1, 0),C( 1, 6, 1),C(24, 2,20),
+  C(28, 6,24),C(18, 4,18),C( 2,10, 2),C(24, 4,22),
+  C( 2,10, 2),C(12, 2,10),C( 1, 6, 1),C( 2, 8, 2),
+  C(28, 4,24),
+  C( 0, 2, 0),C( 1, 6, 1),C( 2, 8, 2),C( 2,10, 2),C( 6,26, 4),C(28, 4,24),C( 2, 8, 2),C(10,30, 6),
+  C( 0, 2, 0),C( 2,10, 2),C(28, 4,24),C( 2, 8, 2),C(12, 2,10),C(18, 2,16),C( 8,20, 6),C(12, 2,12),C( 2, 8, 2),C( 4,14, 4),C( 6,26, 4),
+  C( 0, 2, 0),C( 4,10, 4),C( 2, 8, 2),C(28, 4,24),C(10,30, 6),C( 8,22, 4),C(10,26, 6) },
+
+// 32 BRONZE
+{ "BRONZE",
+  C( 5, 6, 2),C(12,14, 3),C(24,28, 8),C(22,20, 4),C( 4,24,16),C(18,18, 4),
+  C(26,30, 9),C( 3, 3, 1),C( 8,10, 2),C(24,28, 8),
+  C( 6,28,18),C(18,20, 4),C(12,14, 3),C( 4,26,16),
+  C(12,14, 3),C(16,16, 4),C( 8,10, 2),C(10,12, 3),
+  C( 4,24,16),
+  C( 5, 6, 2),C( 8,10, 2),C(12,12, 3),C(12,14, 3),C(24,28, 8),C( 4,24,16),C(10,12, 2),C(22,26, 7),
+  C( 5, 6, 2),C(12,14, 3),C( 4,24,16),C(10,12, 2),C(16,16, 4),C(24,26, 8),C(12,14, 3),C(16,18, 4),C(10,12, 2),C(12,12, 3),C(24,28, 8),
+  C( 5, 6, 2),C(12,12, 3),C(10,12, 2),C( 4,24,16),C(22,26, 7),C(14,14, 3),C(16,16, 4) },
+
+// 33 CIRCUIT
+{ "CIRCUIT",
+  C( 0, 5, 2),C( 1,10, 4),C( 3,20, 7),C( 8,34,10),C(22,18, 4),C( 5,22, 7),
+  C( 5,24, 8),C(28,56,28),C( 0, 7, 3),C( 6,28, 9),
+  C(24,20, 6),C(14,28, 8),C( 2,12, 4),C(20,18, 5),
+  C( 1,10, 4),C( 4,18, 6),C( 0, 7, 3),C( 2,10, 4),
+  C(22,18, 4),
+  C( 0, 5, 2),C( 0, 7, 3),C( 2,12, 4),C( 1,10, 4),C( 3,20, 7),C(22,18, 4),C( 1, 8, 3),C( 6,26, 8),
+  C( 0, 5, 2),C( 1,10, 4),C(22,18, 4),C( 1, 8, 3),C( 4,18, 6),C( 8,32, 9),C( 4,18, 6),C( 6,22, 7),C( 1, 8, 3),C( 2,12, 4),C( 3,20, 7),
+  C( 0, 5, 2),C( 2,10, 4),C( 1, 8, 3),C(22,18, 4),C( 8,32, 9),C( 4,18, 6),C( 6,24, 8) },
+
+// 34 GOLD
+{ "GOLD",
+  C( 2, 2, 0),C( 6, 6, 0),C(26,28, 0),C(22,20, 0),C(31,46, 0),C(20,20, 0),
+  C(28,30, 2),C( 0, 0, 0),C( 4, 4, 0),C(26,28, 0),
+  C(31,50, 2),C(22,22, 0),C(10,10, 0),C(28,30, 0),
+  C( 6, 6, 0),C(16,16, 0),C( 4, 4, 0),C( 6, 6, 0),
+  C(31,46, 0),
+  C( 2, 2, 0),C( 4, 4, 0),C( 8, 8, 0),C( 6, 6, 0),C(26,28, 0),C(31,46, 0),C( 6, 6, 0),C(24,26, 0),
+  C( 2, 2, 0),C( 6, 6, 0),C(31,46, 0),C( 6, 6, 0),C(16,16, 0),C(24,26, 0),C(12,12, 0),C(18,18, 0),C( 6, 6, 0),C(12,12, 0),C(26,28, 0),
+  C( 2, 2, 0),C( 8, 8, 0),C( 6, 6, 0),C(31,46, 0),C(24,26, 0),C(16,16, 0),C(18,18, 0) },
+
+// 35 THUNDER
+{ "THUNDER",
+  C( 3, 3, 3),C( 8, 8, 8),C(28,32, 0),C(20,24, 0),C(31,62,31),C(18,22, 0),
+  C(30,34, 2),C( 1, 1, 0),C( 5, 5, 5),C(26,30, 0),
+  C(31,62,20),C(22,26, 0),C( 8, 8, 8),C(28,34, 0),
+  C( 8, 8, 8),C(14,16, 0),C( 5, 5, 5),C( 8, 8, 6),
+  C(31,62,31),
+  C( 3, 3, 3),C( 5, 5, 5),C( 8, 8, 6),C( 8, 8, 8),C(28,32, 0),C(31,62,31),C( 6, 6, 6),C(24,28, 0),
+  C( 3, 3, 3),C( 8, 8, 8),C(31,62,31),C( 6, 6, 6),C(14,16, 0),C(24,28, 0),C(12,14, 0),C(18,20, 0),C( 6, 6, 6),C(10,10, 0),C(28,32, 0),
+  C( 3, 3, 3),C(10,10, 6),C( 6, 6, 6),C(31,62,31),C(24,28, 0),C(16,18, 0),C(18,22, 0) },
+
+// 36 NATURE
+{ "NATURE",
+  C( 4, 6, 1),C(14,12, 3),C(10,28, 4),C(12,20, 3),C(22,40, 4),C(10,22, 4),
+  C(16,32, 6),C( 2, 3, 0),C( 8, 8, 2),C(14,28, 5),
+  C(24,44, 6),C(14,26, 4),C(10,10, 2),C(20,36, 5),
+  C(14,12, 3),C(14,20, 4),C( 8, 8, 2),C(10,10, 2),
+  C(22,40, 4),
+  C( 4, 6, 1),C( 8, 8, 2),C(10,10, 2),C(14,12, 3),C(10,28, 4),C(22,40, 4),C(10,10, 2),C(16,30, 6),
+  C( 4, 6, 1),C(14,12, 3),C(22,40, 4),C(10,10, 2),C(14,20, 4),C(18,34, 6),C(12,18, 4),C(14,22, 4),C(10,10, 2),C(12,14, 3),C(10,28, 4),
+  C( 4, 6, 1),C(10,12, 3),C(10,10, 2),C(22,40, 4),C(16,30, 6),C(12,20, 4),C(14,22, 4) },
+
+}; // end themes[]
+
+#define NUM_THEMES 37
+
+// ─── Active colour variables (refreshed by refreshTheme) ─────────────────────
+// These replace the old hardcoded #define constants.  All existing draw code
+// reads these variables so only refreshTheme() needs to change when the theme does.
+uint8_t  themeIndex = 0;
+
+// Board / general
+uint16_t C_BG, C_DARK_SQ, C_LIGHT_SQ, C_BORDER, C_HOVER, C_SEL, C_BOTH;
+uint16_t C_DOT, C_LASTMOVE, C_CURSOR_LASTMOVE, C_GAMEOVER;
+uint16_t C_BTN_BG, C_BTN_HL, C_PB_EMPTY, C_PB_BORDER;
+uint16_t C_W_FILL, C_W_TXT, C_B_FILL, C_B_TXT, C_LABEL;
+// Lose / resign / checkmate screens
+uint16_t C_L_BG, C_L_GRID, C_L_ACCENT, C_L_ACCENT2;
+uint16_t C_L_TITLE, C_L_SUB, C_L_CROWN, C_L_CROWN_HI;
+// Keypad
+uint16_t C_K_BG, C_K_HDR, C_K_HDR_TXT, C_K_KEY, C_K_KEY_BDR;
+uint16_t C_K_KEY_TXT, C_K_SEL, C_K_SEL_BDR, C_K_CONFIRM, C_K_DIG_BDR, C_K_DIG_TXT;
+// Intro
+uint16_t C_I_BG, C_I_BOX, C_I_BOX_BDR, C_I_TITLE, C_I_TITLE2, C_I_SUB, C_I_PROMPT;
+
+// Helper: read one uint16_t field from a PROGMEM Theme struct.
+// 'offset' is the field index (0-based, counting only uint16_t fields after the name pointer).
+static inline uint16_t themeField(uint8_t ti, uint8_t offset) {
+  // Each Theme: 4-byte name ptr + offset*2 bytes into uint16_t fields.
+  const uint8_t* base = (const uint8_t*)&themes[ti];
+  return pgm_read_word(base + 4 + offset * 2);
+}
+
+// Read the name pointer from PROGMEM Theme.
+static inline const char* themeName(uint8_t ti) {
+  return (const char*)pgm_read_dword(&themes[ti].name);
+}
+
+void refreshTheme() {
+  uint8_t ti = themeIndex;
+  uint8_t i  = 0;
+  // Board
+  C_BG              = themeField(ti, i++); // bg
+  C_DARK_SQ         = themeField(ti, i++); // darkSq
+  C_LIGHT_SQ        = themeField(ti, i++); // lightSq
+  C_BORDER          = themeField(ti, i++); // border
+  C_HOVER           = themeField(ti, i++); // cursor
+  C_LABEL           = themeField(ti, i++); // label
+  C_W_FILL          = themeField(ti, i++); // wFill
+  C_W_TXT           = themeField(ti, i++); // wTxt
+  C_B_FILL          = themeField(ti, i++); // bFill
+  C_B_TXT           = themeField(ti, i++); // bTxt
+  // Selection / dots / last-move
+  C_SEL             = themeField(ti, i++); // sel
+  C_DOT             = themeField(ti, i++); // dot
+  C_LASTMOVE        = themeField(ti, i++); // lastMove
+  C_CURSOR_LASTMOVE = themeField(ti, i++); // cursorLastMove
+  // Buttons / panel
+  C_BTN_BG          = themeField(ti, i++); // btnBg
+  C_BTN_HL          = themeField(ti, i++); // btnHl
+  C_PB_EMPTY        = themeField(ti, i++); // pbEmpty
+  C_PB_BORDER       = themeField(ti, i++); // pbBorder
+  // Game-over text
+  C_GAMEOVER        = themeField(ti, i++); // gameOver
+  // Lose screen
+  C_L_BG            = themeField(ti, i++); // lBg
+  C_L_GRID          = themeField(ti, i++); // lGrid
+  C_L_ACCENT        = themeField(ti, i++); // lAccent
+  C_L_ACCENT2       = themeField(ti, i++); // lAccent2
+  C_L_TITLE         = themeField(ti, i++); // lTitle
+  C_L_SUB           = themeField(ti, i++); // lSub
+  C_L_CROWN         = themeField(ti, i++); // lCrown
+  C_L_CROWN_HI      = themeField(ti, i++); // lCrownHi
+  // Keypad
+  C_K_BG            = themeField(ti, i++); // kBg
+  C_K_HDR           = themeField(ti, i++); // kHdr
+  C_K_HDR_TXT       = themeField(ti, i++); // kHdrTxt
+  C_K_KEY           = themeField(ti, i++); // kKey
+  C_K_KEY_BDR       = themeField(ti, i++); // kKeyBdr
+  C_K_KEY_TXT       = themeField(ti, i++); // kKeyTxt
+  C_K_SEL           = themeField(ti, i++); // kSelKey
+  C_K_SEL_BDR       = themeField(ti, i++); // kSelBdr
+  C_K_CONFIRM       = themeField(ti, i++); // kConfirm
+  C_K_DIG_BDR       = themeField(ti, i++); // kDigBdr
+  C_K_DIG_TXT       = themeField(ti, i++); // kDigTxt
+  // Intro
+  C_I_BG            = themeField(ti, i++); // iBg
+  C_I_BOX           = themeField(ti, i++); // iBox
+  C_I_BOX_BDR       = themeField(ti, i++); // iBoxBdr
+  C_I_TITLE         = themeField(ti, i++); // iTitle
+  C_I_TITLE2        = themeField(ti, i++); // iTitle2
+  C_I_SUB           = themeField(ti, i++); // iSub
+  C_I_PROMPT        = themeField(ti, i++); // iPrompt
+  // Derived aliases (keep old names working in draw code)
+  C_BOTH            = 0xFFFF;             // sel+hover overlap always white
+}
 
 // Progress bar
 #define PB_X   130
@@ -188,6 +692,7 @@ bool gameOver = false;
 char gameOverMsg[20] = "";
 bool engineThinking = false;
 bool checkmatePending = false;  // true when player is checkmated, waiting for 2s hold
+uint8_t themeMenuSel = 0;       // remembered scroll position in theme menu
 
 // ─── FreeRTOS search task ──────────────────────────────────────────────────
 volatile bool     searchRunning  = false;
@@ -326,6 +831,8 @@ int  seeMoveGain(int fromSq, int toSq, int piece, int attColor);
 bool insufficientMaterial();
 bool isRepetition();
 bool selectSquare(int sq);
+
+void showThemeMenu();
 
 // ─── UI-2: Password system ───────────────────────────────────────────────────
 void showPasswordKeypad();
@@ -2051,16 +2558,13 @@ inline uint16_t sqColor(int sq) {
 }
 
 void drawPieceRainbowBorder(int sx, int sy, int sq) {
-  // Green shimmer: different shades cycling by diagonal position
-  static const uint16_t spec[8] = {
-    0x07E0, 0x03E0, 0x47E4, 0x0540,
-    0x07E0, 0x03A0, 0x27E4, 0x03E0,
-  };
-  int diag = ((sq/8) + (sq%8)) % 8;
+  // Use 4 theme-derived shades cycling by diagonal position
+  uint16_t spec[4] = { C_HOVER, C_BTN_HL, C_SEL, C_BORDER };
+  int diag = ((sq/8) + (sq%8)) % 4;
   uint16_t cTop   = spec[diag];
-  uint16_t cRight = spec[(diag+2) % 8];
-  uint16_t cBot   = spec[(diag+4) % 8];
-  uint16_t cLeft  = spec[(diag+6) % 8];
+  uint16_t cRight = spec[(diag+1) % 4];
+  uint16_t cBot   = spec[(diag+2) % 4];
+  uint16_t cLeft  = spec[(diag+3) % 4];
   tft.drawFastHLine(sx+1,      sy+1,      SQ_W-2, cTop);
   tft.drawFastHLine(sx+1,      sy+SQ_H-2, SQ_W-2, cBot);
   tft.drawFastVLine(sx+1,      sy+1,      SQ_H-2, cLeft);
@@ -2069,11 +2573,11 @@ void drawPieceRainbowBorder(int sx, int sy, int sq) {
 
 void drawPieceAt(int sx, int sy, int piece) {
   if(IS_WHITE(piece)) {
-    tft.fillRect(sx+2, sy+2, SQ_W-4, SQ_H-4, 0x0360);  // dark-mid green fill
-    tft.setTextColor(0xFFFF);                              // white letter
+    tft.fillRect(sx+2, sy+2, SQ_W-4, SQ_H-4, C_W_FILL);
+    tft.setTextColor(C_W_TXT);
   } else {
-    tft.fillRect(sx+2, sy+2, SQ_W-4, SQ_H-4, 0x0841);  // near-black fill
-    tft.setTextColor(0x07E0);                              // bright green letter
+    tft.fillRect(sx+2, sy+2, SQ_W-4, SQ_H-4, C_B_FILL);
+    tft.setTextColor(C_B_TXT);
   }
   tft.setTextSize(1);
   tft.setCursor(sx+4, sy+3);
@@ -2097,7 +2601,11 @@ void drawSquare(int sq) {
 }
 
 void drawBoard() {
-  const uint16_t brc[8] = {0x0180,0x0220,0x0300,0x03A0,0x03E0,0x07E0,0x47E4,0x07E0};
+  // Gradient border using theme shades
+  const uint16_t brc[8] = {
+    C_BTN_BG, C_BTN_BG, C_BORDER, C_BTN_HL,
+    C_HOVER,  C_SEL,    C_BTN_HL, C_HOVER
+  };
   int bx = BOARD_OX-2, by = BOARD_OY-2;
   int bw = 8*SQ_W+4,   bh = 8*SQ_H+4;
   int segW = bw / 8;
@@ -2114,20 +2622,20 @@ void drawBoard() {
     tft.drawFastVLine(bx,      y0, y1-y0+1, brc[7-i]);
     tft.drawFastVLine(bx+bw-1, y0, y1-y0+1, brc[i]);
   }
-  tft.drawRect(BOARD_OX-1, BOARD_OY-1, 8*SQ_W+2, 8*SQ_H+2, 0x03E0);
+  tft.drawRect(BOARD_OX-1, BOARD_OY-1, 8*SQ_W+2, 8*SQ_H+2, C_BTN_HL);
 
   for(int sq=0;sq<64;sq++) drawSquare(sq);
 
   tft.fillRect(14, 4, 7, 104, C_BG);
   for(int r=0;r<8;r++) {
-    tft.setTextColor(brc[r]);
+    tft.setTextColor(C_LABEL);
     tft.setTextSize(1);
     tft.setCursor(15, BOARD_OY + (7-r)*SQ_H + 3);
     tft.print((char)('1'+r));
   }
   tft.fillRect(22, 112, 106, 10, C_BG);
   for(int f=0;f<8;f++) {
-    tft.setTextColor(brc[f]);
+    tft.setTextColor(C_LABEL);
     tft.setTextSize(1);
     tft.setCursor(BOARD_OX + f*SQ_W + 4, 113);
     tft.print((char)('a'+f));
@@ -2145,7 +2653,7 @@ void drawLegalDots() {
     int sq = legalCache[i].to;
     int sx = sqX(sq)+SQ_W/2;
     int sy = sqY(sq)+SQ_H/2;
-    tft.fillCircle(sx, sy, 3, 0x0180);
+    tft.fillCircle(sx, sy, 3, C_BTN_BG);
     tft.fillCircle(sx, sy, 2, C_DOT);
   }
 }
@@ -2191,10 +2699,9 @@ void drawSelOutline() {
 
 void drawPhaseIndicator() {
   int ph = gamePhase();
-  // opening=bright green, middlegame=medium green, endgame=dim+red accent
-  uint16_t col = (ph==0) ? 0x07E0 : (ph==1) ? 0x03E0 : 0xF800;
+  uint16_t col = (ph==0) ? C_HOVER : (ph==1) ? C_BTN_HL : 0xF800;
   tft.fillRect(4, 119, 6, 6, col);
-  tft.drawRect(3, 118, 8, 8, 0x03A0);
+  tft.drawRect(3, 118, 8, 8, C_BORDER);
 }
 
 // ─── UI-3: Draw red flag icon for reset button ────────────────────────────────
@@ -2202,56 +2709,67 @@ void drawPhaseIndicator() {
 // x,y = top-left corner of the icon area (fits in 13x34 panel space)
 void drawFlagIcon(int bx, int by) {
   tft.fillRoundRect(bx, by, 13, 34, 2, C_BTN_BG);
-
   int poleX = bx + 4;
   int poleTop = by + 4;
   int poleBot = by + 29;
-  // Pole stays neutral — a slim gray-green so it doesn't clash with the red flag
-  tft.drawFastVLine(poleX,   poleTop, poleBot - poleTop + 1, 0x0300);
-  tft.drawFastVLine(poleX+1, poleTop, poleBot - poleTop + 1, 0x0180);
-
-  // Red triangular flag — bright red highlight on top edge, dark red shadow on diagonal
-  int flagStartY = poleTop;
+  tft.drawFastVLine(poleX,   poleTop, poleBot - poleTop + 1, C_BORDER);
+  tft.drawFastVLine(poleX+1, poleTop, poleBot - poleTop + 1, C_BTN_BG);
+  // Red triangular flag — always red regardless of theme (it's a danger icon)
   int flagH = 11;
   for(int row = 0; row < flagH; row++) {
-    int rowY = flagStartY + row;
+    int rowY = poleTop + row;
     int w = flagH - row;
     for(int px = 0; px < w; px++) {
       int fx = poleX + 2 + px;
       if(fx < bx + 13) {
-        // Top edge: bright highlight. Trailing edge: dark shadow. Fill: mid red.
         uint16_t c = (row == 0) ? 0xFBA0 : (px == w-1) ? 0x8000 : 0xD000;
         tft.drawPixel(fx, rowY, c);
       }
     }
   }
-
-  // Base foot — dim green shadow line (pole rests on the ground)
-  tft.drawFastHLine(poleX - 1, poleBot + 1, 4, 0x0180);
+  tft.drawFastHLine(poleX - 1, poleBot + 1, 4, C_BTN_BG);
 }
 
 void drawLeftPanel() {
+  // ── Flag (resign) button — y 8..41 ──────────────────────────────────────
   drawFlagIcon(0, 8);
   if(panelFocus==1) {
-    tft.drawFastHLine(0, 8,  13, 0x07E0);
-    tft.drawFastHLine(0, 41, 13, 0x03E0);
-    tft.drawFastVLine(0, 8,  34, 0x07E0);
-    tft.drawFastVLine(12,8,  34, 0x03E0);
+    tft.drawFastHLine(0, 8,  13, C_HOVER);
+    tft.drawFastHLine(0, 41, 13, C_BTN_HL);
+    tft.drawFastVLine(0, 8,  34, C_HOVER);
+    tft.drawFastVLine(12,8,  34, C_BTN_HL);
   }
 
-  tft.fillRoundRect(0, 50, 13, 34, 2, C_BTN_BG);
+  // ── UND (undo) button — y 46..79 ────────────────────────────────────────
+  tft.fillRoundRect(0, 46, 13, 34, 2, C_BTN_BG);
   if(panelFocus==2) {
-    tft.drawFastHLine(0, 50, 13, 0x07E0);
-    tft.drawFastHLine(0, 83, 13, 0x03A0);
-    tft.drawFastVLine(0, 50, 34, 0x07E0);
-    tft.drawFastVLine(12,50, 34, 0x03A0);
+    tft.drawFastHLine(0, 46, 13, C_HOVER);
+    tft.drawFastHLine(0, 79, 13, C_BTN_HL);
+    tft.drawFastVLine(0, 46, 34, C_HOVER);
+    tft.drawFastVLine(12,46, 34, C_BTN_HL);
   }
   tft.setTextSize(1);
-  tft.setTextColor(0x03E0); tft.setCursor(4, 54); tft.print('U');
-  tft.setTextColor(0x03A0); tft.setCursor(4, 63); tft.print('N');
-  tft.setTextColor(0x0360); tft.setCursor(4, 72); tft.print('D');
+  tft.setTextColor(C_BTN_HL);  tft.setCursor(4, 50); tft.print('U');
+  tft.setTextColor(C_BORDER);  tft.setCursor(4, 59); tft.print('N');
+  tft.setTextColor(C_BTN_BG);  tft.setCursor(4, 68); tft.print('D');
 
-  tft.drawFastVLine(13, 4, 104, 0x03A0);
+  // ── Palette (theme) button — y 83..100 ─────────────────────────────────
+  // A small square showing the current theme's 3-colour swatch
+  int py = 83;
+  tft.fillRoundRect(0, py, 13, 18, 2, C_BTN_BG);
+  if(panelFocus==3) {
+    tft.drawFastHLine(0, py,    13, C_HOVER);
+    tft.drawFastHLine(0, py+17, 13, C_BTN_HL);
+    tft.drawFastVLine(0, py,    18, C_HOVER);
+    tft.drawFastVLine(12,py,    18, C_BTN_HL);
+  }
+  // 3-colour swatch: darkSq | lightSq | cursor — each 4px wide
+  tft.fillRect(1,  py+4, 4, 10, C_DARK_SQ);
+  tft.fillRect(5,  py+4, 4, 10, C_LIGHT_SQ);
+  tft.fillRect(9,  py+4, 3, 10, C_HOVER);
+
+  // ── Divider line ─────────────────────────────────────────────────────────
+  tft.drawFastVLine(13, 4, 104, C_BORDER);
 }
 
 void drawProgressBar(int pct) {
@@ -2311,9 +2829,8 @@ void drawGameOver() {
   int len = strlen(gameOverMsg);
   int tw  = len * 6;
   int tx  = 22 + (104 - tw) / 2;
-  const uint16_t brc[8] = {0x03E0,0x05E0,0x03E0,0x05E0,0x03E0,0x05E0,0x03E0,0x05E0};
   for(int i=0; i<len; i++) {
-    tft.setTextColor(brc[i % 8]);
+    tft.setTextColor((i % 2 == 0) ? C_GAMEOVER : C_BTN_HL);
     tft.setCursor(tx + i*6, 120);
     tft.print(gameOverMsg[i]);
   }
@@ -2454,238 +2971,135 @@ static const char kpLabels[5][3] = {
 // 6 boxes × 20 + 5 gaps × 3 = 120+15 = 135; left margin = (160-135)/2 = 12
 #define KP_DIG_X   12  // left margin of first digit box
 
-// Draw a single keypad key
+// Draw a single keypad key using theme colours
 void drawKeypadKey(int col, int row, bool selected) {
-  // Row 4 = full-width OK button
   int kx, ky, kw;
   if(row == 4) {
-    kx = KP_X;
-    ky = KP_Y + 4 * (KP_KH + KP_GAP);
-    kw = 3 * KP_KW + 2 * KP_GAP;  // full width spanning all 3 cols
-    if(col != 0) return;            // only draw once
+    kx = KP_X; ky = KP_Y + 4*(KP_KH+KP_GAP); kw = 3*KP_KW+2*KP_GAP;
+    if(col != 0) return;
   } else {
-    kx = KP_X + col * (KP_KW + KP_GAP);
-    ky = KP_Y + row * (KP_KH + KP_GAP);
-    kw = KP_KW;
+    kx = KP_X + col*(KP_KW+KP_GAP); ky = KP_Y + row*(KP_KH+KP_GAP); kw = KP_KW;
   }
-
   char label = kpLabels[row][col];
-
   uint16_t bgCol, borderCol, textCol;
-
   if(row == 4) {
-    // CONFIRM button: bright green
-    if(selected) {
-      bgCol     = 0x0300;
-      borderCol = 0x07E0;
-      textCol   = 0xFFFF;
-    } else {
-      bgCol     = 0x0180;
-      borderCol = 0x03E0;
-      textCol   = 0x07E0;
-    }
+    bgCol     = selected ? C_K_SEL     : C_K_CONFIRM;
+    borderCol = selected ? C_K_SEL_BDR : C_K_KEY_BDR;
+    textCol   = selected ? 0xFFFF      : C_K_KEY_TXT;
   } else if(label == 'B') {
-    // Back button: dark green with dim glow
-    if(selected) {
-      bgCol     = 0x0300;
-      borderCol = 0x47E4;
-      textCol   = 0xFFFF;
-    } else {
-      bgCol     = 0x0140;
-      borderCol = 0x0300;
-      textCol   = 0x03E0;
-    }
+    bgCol     = selected ? C_K_SEL     : C_K_KEY;
+    borderCol = selected ? C_K_SEL_BDR : C_K_KEY_BDR;
+    textCol   = selected ? 0xFFFF      : C_K_KEY_TXT;
   } else if(label == '<') {
-    // Delete: red (only non-green accent — danger)
-    if(selected) {
-      bgCol     = 0x2800;
-      borderCol = 0xF800;
-      textCol   = 0xFFFF;
-    } else {
-      bgCol     = 0x1000;
-      borderCol = 0x6000;
-      textCol   = 0xF800;
-    }
+    // Delete key — always red (danger), regardless of theme
+    bgCol     = selected ? 0x2800 : 0x1000;
+    borderCol = selected ? 0xF800 : 0x6000;
+    textCol   = selected ? 0xFFFF : 0xF800;
   } else {
-    // Normal digit key — green tones
-    if(selected) {
-      bgCol     = 0x0300;
-      borderCol = 0x07E0;
-      textCol   = 0xFFFF;
-    } else {
-      bgCol     = 0x0180;
-      borderCol = 0x03A0;
-      textCol   = 0x07E0;
-    }
+    bgCol     = selected ? C_K_SEL     : C_K_KEY;
+    borderCol = selected ? C_K_SEL_BDR : C_K_KEY_BDR;
+    textCol   = selected ? 0xFFFF      : C_K_KEY_TXT;
   }
-
   tft.fillRoundRect(kx, ky, kw, KP_KH, 2, bgCol);
   tft.drawRoundRect(kx, ky, kw, KP_KH, 2, borderCol);
-
-  // Subtle top-edge highlight
-  if(!selected)
-    tft.drawFastHLine(kx+2, ky+1, kw-4, 0x03A0);
-
-  tft.setTextSize(1);
-  tft.setTextColor(textCol);
-
+  if(!selected) tft.drawFastHLine(kx+2, ky+1, kw-4, C_K_HDR);
+  tft.setTextSize(1); tft.setTextColor(textCol);
   if(row == 4) {
-    // Centered "CONFIRM"
-    const char* okTxt = "CONFIRM";
-    int tlen = strlen(okTxt);
-    tft.setCursor(kx + (kw - tlen*6)/2, ky + (KP_KH - 8)/2);
-    tft.print(okTxt);
+    const char* ok = "CONFIRM"; int tl = strlen(ok);
+    tft.setCursor(kx+(kw-tl*6)/2, ky+(KP_KH-8)/2); tft.print(ok);
   } else if(label == 'B') {
-    const char* bTxt = "BACK";
-    tft.setCursor(kx + (kw - 4*6)/2, ky + (KP_KH-8)/2);
-    tft.print(bTxt);
+    tft.setCursor(kx+(kw-4*6)/2, ky+(KP_KH-8)/2); tft.print("BACK");
   } else if(label == '<') {
-    tft.setCursor(kx + (kw - 2*6)/2, ky + (KP_KH-8)/2);
-    tft.print("<-");
+    tft.setCursor(kx+(kw-2*6)/2, ky+(KP_KH-8)/2); tft.print("<-");
   } else {
-    // Single digit — center it
-    tft.setCursor(kx + (kw - 6)/2, ky + (KP_KH-8)/2);
-    tft.print(label);
+    tft.setCursor(kx+(kw-6)/2, ky+(KP_KH-8)/2); tft.print(label);
   }
 }
 
 // Redraw only the digit display row
 void drawKeypadDigits() {
-  tft.fillRect(0, KP_DIG_Y - 4, 160, KP_DIG_H + 10, C_BG);
-
+  tft.fillRect(0, KP_DIG_Y-4, 160, KP_DIG_H+10, C_K_BG);
   for(int i = 0; i < 6; i++) {
-    int bx2 = KP_DIG_X + i * (KP_DIG_W + KP_DIG_GAP);
-
-    tft.fillRoundRect(bx2, KP_DIG_Y, KP_DIG_W, KP_DIG_H, 2, 0x0180);
-
-    uint16_t borderC = (i == kpDigitCount) ? 0x07E0 : 0x03A0;
-    tft.drawRoundRect(bx2, KP_DIG_Y, KP_DIG_W, KP_DIG_H, 2, borderC);
-
+    int bx2 = KP_DIG_X + i*(KP_DIG_W+KP_DIG_GAP);
+    tft.fillRoundRect(bx2, KP_DIG_Y, KP_DIG_W, KP_DIG_H, 2, C_K_KEY);
+    uint16_t bdrC = (i == kpDigitCount) ? C_K_DIG_BDR : C_K_KEY_BDR;
+    tft.drawRoundRect(bx2, KP_DIG_Y, KP_DIG_W, KP_DIG_H, 2, bdrC);
     if(i < kpDigitCount) {
-      tft.setTextSize(1);
-      tft.setTextColor(0x07E0);
-      tft.setCursor(bx2 + (KP_DIG_W - 6)/2, KP_DIG_Y + (KP_DIG_H - 8)/2);
+      tft.setTextSize(1); tft.setTextColor(C_K_DIG_TXT);
+      tft.setCursor(bx2+(KP_DIG_W-6)/2, KP_DIG_Y+(KP_DIG_H-8)/2);
       tft.print('*');
     } else if(i == kpDigitCount) {
-      tft.drawFastHLine(bx2 + 6, KP_DIG_Y + KP_DIG_H - 3, KP_DIG_W - 12, 0x07E0);
+      tft.drawFastHLine(bx2+6, KP_DIG_Y+KP_DIG_H-3, KP_DIG_W-12, C_K_DIG_BDR);
     }
   }
 }
 
 void drawKeypad(bool redrawAll) {
   if(redrawAll) {
-    tft.fillScreen(C_BG);
-
-    // ── Header bar ──────────────────────────────────────────────────────────
-    tft.fillRect(0, 0, 160, 28, 0x0180);
-
-    // Green gradient line across very top
-    {
-      const uint16_t segs[6] = {0x0180,0x0300,0x03E0,0x07E0,0x03E0,0x0300};
-      int sw = 160/6;
-      for(int i=0;i<6;i++) tft.drawFastHLine(i*sw, 0, (i==5)?160-i*sw:sw, segs[i]);
-    }
-    // Separator below header
-    tft.drawFastHLine(0, 27, 160, 0x03A0);
-
-    // Pixel-art padlock icon — bright green
-    tft.drawFastVLine(5, 5, 5,  0x07E0);
-    tft.drawFastVLine(12, 5, 5, 0x07E0);
-    tft.drawFastHLine(5, 5, 8,  0x07E0);
-    tft.fillRoundRect(2, 10, 14, 12, 2, 0x03E0);
-    tft.fillRect(7, 13, 4, 6, C_BG);
-    tft.fillCircle(9, 13, 2, C_BG);
-
-    // Title
+    tft.fillScreen(C_K_BG);
+    tft.fillRect(0, 0, 160, 28, C_K_HDR);
+    // Gradient top edge
+    { int sw = 160/6;
+      uint16_t segs[6] = {C_K_KEY, C_K_KEY_BDR, C_K_HDR_TXT, C_HOVER, C_K_HDR_TXT, C_K_KEY_BDR};
+      for(int i=0;i<6;i++) tft.drawFastHLine(i*sw, 0, (i==5)?160-i*sw:sw, segs[i]); }
+    tft.drawFastHLine(0, 27, 160, C_K_KEY_BDR);
+    // Padlock icon
+    tft.drawFastVLine(5,  5, 5, C_K_HDR_TXT);
+    tft.drawFastVLine(12, 5, 5, C_K_HDR_TXT);
+    tft.drawFastHLine(5,  5, 8, C_K_HDR_TXT);
+    tft.fillRoundRect(2, 10, 14, 12, 2, C_K_SEL);
+    tft.drawRoundRect(2, 10, 14, 12, 2, C_K_HDR_TXT);
+    tft.fillRect(7, 13, 4, 6, C_K_BG); tft.fillCircle(9, 13, 2, C_K_BG);
     tft.setTextSize(1);
-    tft.setTextColor(0x07E0);
-    tft.setCursor(22, 6);
-    tft.print("ENTER PASSWORD");
-    tft.setTextColor(0x03A0);
-    tft.setCursor(22, 16);
-    tft.print("6 digits required");
-
-    // Separator above digit boxes
-    tft.drawFastHLine(8, KP_DIG_Y - 2, 144, 0x03A0);
+    tft.setTextColor(C_K_HDR_TXT); tft.setCursor(22,  6); tft.print("ENTER PASSWORD");
+    tft.setTextColor(C_K_KEY_BDR); tft.setCursor(22, 16); tft.print("6 digits required");
+    tft.drawFastHLine(8, KP_DIG_Y-2, 144, C_K_KEY_BDR);
   }
-
-  // ── Digit display ────────────────────────────────────────────────────────
   drawKeypadDigits();
-
-  // Thin separator between digits and keypad
-  tft.drawFastHLine(4, KP_Y - 2, 152, 0x03A0);
-
-  // ── Draw all keys ────────────────────────────────────────────────────────
-  for(int r = 0; r < 5; r++) {
+  tft.drawFastHLine(4, KP_Y-2, 152, C_K_KEY_BDR);
+  for(int r = 0; r < 5; r++)
     for(int c = 0; c < 3; c++) {
-      if(r == 4 && c != 0) continue;
-      drawKeypadKey(c, r, (c == kpCurCol && r == kpCurRow));
+      if(r==4 && c!=0) continue;
+      drawKeypadKey(c, r, (c==kpCurCol && r==kpCurRow));
     }
-  }
 }
 
-// Show "WRONG PASSWORD" flash screen
+// "WRONG PASSWORD" flash — always red X (danger), theme bg
 void drawWrongPassword() {
-  tft.fillScreen(0x0841);  // near-black with green tint background
-
-  // Red X icon (danger — intentional non-green)
+  tft.fillScreen(C_K_BG);
   tft.fillRoundRect(60, 20, 40, 40, 5, 0x8000);
   tft.drawRoundRect(60, 20, 40, 40, 5, 0xF800);
   tft.drawFastHLine(65, 60, 30, 0x6000);
-
-  // Big X in bright red
   for(int i = 0; i < 20; i++) {
-    tft.drawPixel(65+i,   28+i, 0xF800);
-    tft.drawPixel(65+i+1, 28+i, 0xF800);
-    tft.drawPixel(84-i,   28+i, 0xF800);
-    tft.drawPixel(85-i,   28+i, 0xF800);
+    tft.drawPixel(65+i,   28+i, 0xF800); tft.drawPixel(65+i+1, 28+i, 0xF800);
+    tft.drawPixel(84-i,   28+i, 0xF800); tft.drawPixel(85-i,   28+i, 0xF800);
   }
-
-  // Text
   tft.setTextSize(1);
-  tft.setTextColor(0xFFFF);
-  tft.setCursor(34, 70);
-  tft.print("WRONG PASSWORD");
-
-  tft.setTextColor(0xF800);
-  tft.setCursor(46, 83);
-  tft.print("Try again!");
-
-  // Bottom hint bar
-  tft.fillRect(0, 115, 160, 13, 0x0180);
-  tft.drawFastHLine(0, 115, 160, 0x03E0);
-  tft.setTextColor(0x03E0);
-  tft.setCursor(22, 118);
-  tft.print("Returning in 1s...");
+  tft.setTextColor(0xFFFF); tft.setCursor(34, 70); tft.print("WRONG PASSWORD");
+  tft.setTextColor(0xF800); tft.setCursor(46, 83); tft.print("Try again!");
+  tft.fillRect(0, 115, 160, 13, C_K_HDR);
+  tft.drawFastHLine(0, 115, 160, C_K_HDR_TXT);
+  tft.setTextColor(C_K_HDR_TXT); tft.setCursor(22, 118); tft.print("Returning in 1s...");
 }
 
 // Show "UNDO OK" confirmation flash
 void drawUndoOK() {
-  tft.fillScreen(0x0020);  // deep dark green bg
-
-  // Green checkmark circle
-  tft.fillRoundRect(60, 20, 40, 40, 5, 0x0300);
-  tft.drawRoundRect(60, 20, 40, 40, 5, 0x07E0);
-  tft.drawFastHLine(65, 60, 30, 0x03E0);
-
-  // Checkmark in bright green
+  tft.fillScreen(C_BG);
+  tft.fillRoundRect(60, 20, 40, 40, 5, C_BTN_BG);
+  tft.drawRoundRect(60, 20, 40, 40, 5, C_HOVER);
+  tft.drawFastHLine(65, 60, 30, C_BTN_HL);
+  // Checkmark strokes
   for(int i = 0; i < 8; i++) {
-    tft.drawPixel(67+i, 44+i,   0x07E0);
-    tft.drawPixel(67+i+1, 44+i, 0x07E0);
+    tft.drawPixel(67+i, 44+i,   C_HOVER);
+    tft.drawPixel(67+i+1, 44+i, C_HOVER);
   }
   for(int i = 0; i < 15; i++) {
-    tft.drawPixel(74+i, 52-i,   0x07E0);
-    tft.drawPixel(74+i+1, 52-i, 0x07E0);
+    tft.drawPixel(74+i, 52-i,   C_HOVER);
+    tft.drawPixel(74+i+1, 52-i, C_HOVER);
   }
-
   tft.setTextSize(1);
-  tft.setTextColor(0x47E4);
-  tft.setCursor(52, 70);
-  tft.print("UNDO OK!");
-
-  tft.setTextColor(0x03E0);
-  tft.setCursor(28, 83);
-  tft.print("Move undone.");
+  tft.setTextColor(C_SEL);   tft.setCursor(52, 70); tft.print("UNDO OK!");
+  tft.setTextColor(C_BTN_HL);tft.setCursor(28, 83); tft.print("Move undone.");
   delay(600);
 }
 
@@ -2787,86 +3201,52 @@ bool runPasswordUI() {
 // UI-3: RESIGN SCREEN
 // ═══════════════════════════════════════════════════════════════════════════════
 void showResignScreen() {
-  tft.fillScreen(0x0000);
+  tft.fillScreen(C_L_BG);
+  for(int gy = 0; gy < 128; gy += 8)
+    for(int gx = 0; gx < 160; gx += 8)
+      if(((gx/8 + gy/8) & 1) == 0) tft.fillRect(gx, gy, 8, 8, C_L_GRID);
 
-  // Subtle dark-green chess grid background
-  for(int gy = 0; gy < 128; gy += 8) {
-    for(int gx = 0; gx < 160; gx += 8) {
-      if(((gx/8 + gy/8) & 1) == 0)
-        tft.fillRect(gx, gy, 8, 8, 0x0060);
-    }
-  }
+  tft.fillRect(0, 0, 160, 3, C_L_ACCENT);
+  tft.fillRect(0, 3, 160, 1, C_L_CROWN);
 
-  // Top accent bar — green
-  tft.fillRect(0, 0, 160, 3, 0x03E0);
-  tft.fillRect(0, 3, 160, 1, 0x0300);
-
-  // King toppled — green crown, white cross
   int cx = 80, cy = 28;
-  tft.fillRect(cx-10, cy+4, 20, 6, 0x03E0);
-  tft.fillRect(cx-10, cy, 3, 5, 0x03E0);
-  tft.fillRect(cx-2,  cy-2, 5, 7, 0x47E4);
-  tft.fillRect(cx+7,  cy, 3, 5, 0x03E0);
-  tft.fillRect(cx-2,  cy-6, 5, 5, 0x47E4);
-  tft.fillRect(cx-5,  cy-3, 11, 2, 0x47E4);
-  tft.drawFastHLine(cx-14, cy+10, 28, 0x0300);
-  tft.fillRect(cx-14, cy+11, 28, 2, 0x0180);
+  tft.fillRect(cx-10, cy+4, 20, 6, C_L_CROWN);
+  tft.fillRect(cx-10, cy,   3,  5, C_L_CROWN);
+  tft.fillRect(cx-2,  cy-2, 5,  7, C_L_CROWN_HI);
+  tft.fillRect(cx+7,  cy,   3,  5, C_L_CROWN);
+  tft.fillRect(cx-2,  cy-6, 5,  5, C_L_CROWN_HI);
+  tft.fillRect(cx-5,  cy-3, 11, 2, C_L_CROWN_HI);
+  tft.drawFastHLine(cx-14, cy+10, 28, C_L_ACCENT2);
+  tft.fillRect(cx-14, cy+11, 28, 2, C_L_BG);
 
-  // "YOU RESIGNED" — green shimmer gradient
-  {
-    tft.setTextSize(1);
+  { tft.setTextSize(1);
     const char* t1 = "YOU RESIGNED";
-    int l = strlen(t1);
-    int x0 = (160 - l*6) / 2;
-    const uint16_t grad[12] = {
-      0x03E0,0x05E0,0x03E0,0x05E0,0x03E0,0x05E0,
-      0x03E0,0x05E0,0x03E0,0x05E0,0x03E0,0x05E0
-    };
+    int l = strlen(t1), x0 = (160 - l*6) / 2;
     for(int i = 0; i < l; i++) {
-      tft.setTextColor(grad[i % 12]);
-      tft.setCursor(x0 + i*6, 52);
-      tft.print(t1[i]);
+      tft.setTextColor((i%2==0) ? C_L_TITLE : C_L_CROWN);
+      tft.setCursor(x0 + i*6, 52); tft.print(t1[i]);
     }
   }
+  tft.drawFastHLine(20, 63, 120, C_L_ACCENT2);
+  tft.setTextColor(C_L_TITLE); tft.setTextSize(1);
+  { const char* go = "GAME OVER"; int gl=strlen(go);
+    tft.setCursor((160-gl*6)/2, 68); tft.print(go); }
+  tft.setTextColor(C_L_SUB);
+  { const char* yl = "You lost."; int yll=strlen(yl);
+    tft.setCursor((160-yll*6)/2, 80); tft.print(yl); }
 
-  tft.drawFastHLine(20, 63, 120, 0x03A0);
-
-  // "GAME OVER"
-  {
-    const char* go = "GAME OVER";
-    int gl = strlen(go);
-    tft.setTextColor(0x03E0);
-    tft.setCursor((160 - gl*6) / 2, 68);
-    tft.print(go);
-  }
-
-  // "You lost."
-  {
-    const char* yl = "You lost.";
-    int yll = strlen(yl);
-    tft.setTextColor(0x07E0);
-    tft.setCursor((160 - yll*6) / 2, 80);
-    tft.print(yl);
-  }
-
-  // Bottom bar
-  tft.fillRect(0, 108, 160, 1, 0x03A0);
-  tft.fillRect(0, 109, 160, 19, 0x0060);
-
-  // Piece row — alternating green shades
-  const uint16_t pieceCol[6] = {0x07E0,0x03E0,0x07E0,0x03E0,0x07E0,0x03E0};
+  tft.fillRect(0, 108, 160, 1, C_L_ACCENT2);
+  tft.fillRect(0, 109, 160, 19, C_L_GRID);
   const char pieceChars[6] = {'K','Q','R','B','N','P'};
   for(int i = 0; i < 6; i++) {
-    tft.setTextColor(pieceCol[i]);
-    tft.setCursor(14 + i*22, 111);
-    tft.print(pieceChars[i]);
+    tft.setTextColor((i%2==0) ? C_L_TITLE : C_L_CROWN);
+    tft.setCursor(14 + i*22, 111); tft.print(pieceChars[i]);
   }
+  tft.drawFastHLine(0, 127, 160, C_L_ACCENT);
 
-  tft.drawFastHLine(0, 127, 160, 0x07E0);
-
-  while(digitalRead(JOY_SW) == LOW) { yield(); delay(10); }
-  while(digitalRead(JOY_SW) != LOW) { yield(); delay(20); }
-  while(digitalRead(JOY_SW) == LOW) { yield(); delay(10); }
+  while(digitalRead(JOY_SW) == LOW)  { yield(); delay(10); }
+  while(digitalRead(JOY_SW) != LOW)  { yield(); delay(20); }
+  while(digitalRead(JOY_SW) == LOW)  { yield(); delay(10); }
 }
 
 
@@ -2874,86 +3254,61 @@ void showResignScreen() {
 // CHECKMATE "YOU LOST" SCREEN
 // ═══════════════════════════════════════════════════════════════════════════════
 void showCheckmateScreen() {
-  tft.fillScreen(0x0000);
+  tft.fillScreen(C_L_BG);
+  for(int gy = 0; gy < 128; gy += 8)
+    for(int gx = 0; gx < 160; gx += 8)
+      if(((gx/8 + gy/8) & 1) == 0) tft.fillRect(gx, gy, 8, 8, C_L_GRID);
 
-  // Very dark green grid background
-  for(int gy = 0; gy < 128; gy += 8) {
-    for(int gx = 0; gx < 160; gx += 8) {
-      if(((gx/8 + gy/8) & 1) == 0)
-        tft.fillRect(gx, gy, 8, 8, 0x0040);
-    }
-  }
+  // Top accent — always red for checkmate (danger signal), theme accent on right
+  tft.fillRect(0,  0, 80, 2, 0xD000);
+  tft.fillRect(80, 0, 80, 2, C_L_ACCENT);
+  tft.fillRect(0,  2, 160, 1, C_L_CROWN);
+  tft.fillRect(0,  3, 160, 1, C_L_BG);
 
-  // Top accent bar — dual stripe: red + green
-  tft.fillRect(0, 0, 160, 2, 0xD000);
-  tft.fillRect(0, 2, 160, 1, 0x03E0);
-  tft.fillRect(0, 3, 160, 1, 0x0180);
-
-  // Fallen king — body in dark red, crown tip in mid red
+  // Fallen king — theme crown colours
   int cx = 80, cy = 28;
-  tft.fillRect(cx-10, cy+4, 20, 6, 0x8000);
-  tft.fillRect(cx-10, cy, 3, 5, 0x8000);
-  tft.fillRect(cx-2,  cy-2, 5, 7, 0xD000);
-  tft.fillRect(cx+7,  cy, 3, 5, 0x8000);
-  tft.fillRect(cx-2,  cy-6, 5, 5, 0xD000);
-  tft.fillRect(cx-5,  cy-3, 11, 2, 0xD000);
-  tft.drawFastHLine(cx-14, cy+10, 28, 0x4000);
-  tft.fillRect(cx-14, cy+11, 28, 2, 0x2000);
+  tft.fillRect(cx-10, cy+4, 20, 6, C_L_CROWN);
+  tft.fillRect(cx-10, cy,   3,  5, C_L_CROWN);
+  tft.fillRect(cx-2,  cy-2, 5,  7, C_L_CROWN_HI);
+  tft.fillRect(cx+7,  cy,   3,  5, C_L_CROWN);
+  tft.fillRect(cx-2,  cy-6, 5,  5, C_L_CROWN_HI);
+  tft.fillRect(cx-5,  cy-3, 11, 2, C_L_CROWN_HI);
+  tft.drawFastHLine(cx-14, cy+10, 28, C_L_ACCENT2);
+  tft.fillRect(cx-14, cy+11, 28, 2, C_L_BG);
 
-  // "YOU LOST" — shades of red
-  {
-    tft.setTextSize(2);
-    const char* t1 = "YOU LOST";
-    int tlen = strlen(t1);
+  // "YOU LOST" — large, alternating theme title colours
+  { tft.setTextSize(2);
+    const char* t1 = "YOU LOST"; int tlen = strlen(t1);
     int tx0 = (160 - tlen*12)/2;
-    const uint16_t tgrad[8] = {0xF800,0xD000,0xF800,0xA800,0xF800,0xD000,0xF800,0xA800};
     for(int i = 0; i < tlen; i++) {
-      tft.setTextColor(tgrad[i % 8]);
-      tft.setCursor(tx0 + i*12, 48);
-      tft.print(t1[i]);
+      tft.setTextColor((i%2==0) ? C_L_TITLE : C_L_CROWN_HI);
+      tft.setCursor(tx0 + i*12, 48); tft.print(t1[i]);
     }
   }
 
-  // Divider — half red, half green
-  tft.drawFastHLine(20,  68, 60, 0x8000);
-  tft.drawFastHLine(80,  68, 60, 0x0300);
+  // Divider — left red, right theme accent
+  tft.drawFastHLine(20, 68, 60, 0x8000);
+  tft.drawFastHLine(80, 68, 60, C_L_ACCENT2);
 
-  // "CHECKMATE" — mid green (the machine speaks)
-  {
-    const char* go = "CHECKMATE";
-    int gl = strlen(go);
-    tft.setTextColor(0x03E0);
-    tft.setCursor((160 - gl*6) / 2, 73);
-    tft.print(go);
-  }
+  tft.setTextColor(C_L_SUB); tft.setTextSize(1);
+  { const char* go = "CHECKMATE"; int gl=strlen(go);
+    tft.setCursor((160-gl*6)/2, 73); tft.print(go); }
+  tft.setTextColor(C_L_TITLE);
+  { const char* bw = "Black wins."; int bwl=strlen(bw);
+    tft.setCursor((160-bwl*6)/2, 85); tft.print(bw); }
 
-  // "Black wins." — bright green
-  {
-    const char* yl = "Black wins.";
-    int yll = strlen(yl);
-    tft.setTextColor(0x05E0);
-    tft.setCursor((160 - yll*6) / 2, 85);
-    tft.print(yl);
-  }
-
-  // Bottom bar — left half red, right half green
-  tft.fillRect(0,   108, 80, 1, 0x8000);
-  tft.fillRect(80,  108, 80, 1, 0x03A0);
-  tft.fillRect(0,   109, 80, 19, 0x1800);
-  tft.fillRect(80,  109, 80, 19, 0x0060);
-
-  // Piece row — red on left side, green on right side
-  const uint16_t pieceCol[6] = {0xF800,0xD000,0xA800,0x03E0,0x05E0,0x03A0};
+  // Bottom bar — left red, right theme
+  tft.fillRect(0,  108, 80, 1, 0x8000);
+  tft.fillRect(80, 108, 80, 1, C_L_ACCENT2);
+  tft.fillRect(0,  109, 80, 19, C_L_GRID);
+  tft.fillRect(80, 109, 80, 19, C_L_GRID);
   const char pieceChars2[6] = {'K','Q','R','B','N','P'};
   for(int i = 0; i < 6; i++) {
-    tft.setTextColor(pieceCol[i]);
-    tft.setCursor(14 + i*22, 111);
-    tft.print(pieceChars2[i]);
+    tft.setTextColor((i < 3) ? C_L_TITLE : C_L_CROWN);
+    tft.setCursor(14 + i*22, 111); tft.print(pieceChars2[i]);
   }
-
-  // Bottom edge — split accent
   tft.drawFastHLine(0,  127, 80, 0xD000);
-  tft.drawFastHLine(80, 127, 80, 0x07E0);
+  tft.drawFastHLine(80, 127, 80, C_L_ACCENT);
 
   delay(1500);
 }
@@ -2962,37 +3317,35 @@ void showCheckmateScreen() {
 // ═══════════════════════════════════════════════════════════════════════════════
 // UI-4: INTRO CUTSCENE
 // ═══════════════════════════════════════════════════════════════════════════════
-
-// ─── Intro splash (single frame) ─────────────────────────────────────────────
 void playIntroCutscene() {
-  tft.fillScreen(0x0000);
+  tft.fillScreen(C_I_BG);
 
-  // Border
-  tft.drawRect(4, 20, 152, 88, 0x03E0);
-  tft.drawRect(5, 21, 150, 86, 0x0180);
+  // Border box
+  tft.drawRect(4, 20, 152, 88, C_I_BOX_BDR);
+  tft.drawRect(5, 21, 150, 86, C_I_BOX);
 
-  // Title line 1: "RageMate"
+  // Title: "RageMate"
   tft.setTextSize(2);
   const char* l1 = "RageMate";
-  tft.setTextColor(0x07E0);
+  tft.setTextColor(C_I_TITLE);
   tft.setCursor((160 - (int)strlen(l1)*12) / 2, 34);
   tft.print(l1);
 
-  // Title line 2: "Valkyra Alpha"
+  // Subtitle: "Valkyra Alpha"
   tft.setTextSize(1);
   const char* l2 = "Valkyra Alpha";
-  tft.setTextColor(0x03E0);
+  tft.setTextColor(C_I_TITLE2);
   tft.setCursor((160 - (int)strlen(l2)*6) / 2, 58);
   tft.print(l2);
 
-  // Version line
-  const char* l3 = "V5";
-  tft.setTextColor(0x47E4);
+  // Version
+  const char* l3 = "V6";
+  tft.setTextColor(C_I_SUB);
   tft.setCursor((160 - (int)strlen(l3)*6) / 2, 72);
   tft.print(l3);
 
-  // Press to begin
-  tft.setTextColor(0x03A0);
+  // Prompt
+  tft.setTextColor(C_I_PROMPT);
   tft.setCursor(28, 96);
   tft.print("> press to begin <");
 
@@ -3000,7 +3353,7 @@ void playIntroCutscene() {
   while(digitalRead(JOY_SW) != LOW)  { yield(); delay(20); }
   while(digitalRead(JOY_SW) == LOW)  { yield(); delay(10); }
 
-  tft.fillScreen(0x0000);
+  tft.fillScreen(C_I_BG);
 }
 
 
@@ -3033,7 +3386,8 @@ void handleJoystick() {
     if(newCol < 0) {
       cursorCol = -1;
       cursorRow = newRow;
-      panelFocus = (newRow >= 4) ? 1 : 2;
+      // Map board row to panel focus: rows 5-7→flag(1), rows 2-4→undo(2), rows 0-1→theme(3)
+      panelFocus = (newRow >= 5) ? 1 : (newRow >= 2) ? 2 : 3;
       drawLeftPanel();
     } else {
       cursorCol = constrain(newCol, 0, 7);
@@ -3048,8 +3402,11 @@ void handleJoystick() {
       drawLeftPanel();
       drawCursorAt(cursorCol, cursorRow);
     } else if(dy != 0) {
-      panelFocus = (panelFocus == 1) ? 2 : 1;
-      cursorRow = (panelFocus == 1) ? 6 : 2;
+      // Cycle 1→2→3→1
+      if(panelFocus == 1)      panelFocus = 2;
+      else if(panelFocus == 2) panelFocus = 3;
+      else                     panelFocus = 1;
+      cursorRow = (panelFocus == 1) ? 6 : (panelFocus == 2) ? 3 : 1;
       drawLeftPanel();
     }
   }
@@ -3138,6 +3495,13 @@ void handleButton() {
   }
 
   if(cursorCol < 0 && pressed) {
+    // panelFocus 3 = theme selector — single press, no hold
+    if(panelFocus == 3) {
+      if(millis()-lastPress < 300) return;
+      lastPress = millis();
+      showThemeMenu();
+      return;
+    }
     int wantAction = (panelFocus == 1) ? 1 : (panelFocus == 2 ? 2 : 0);
     if(wantAction != 0) {
       if(holdAction != wantAction) {
@@ -3292,9 +3656,160 @@ bool selectSquare(int sq) {
   return legalCount > 0;
 }
 
-// ─── Restart / Undo ───────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+// UI-5: THEME SELECTION MENU
+// ═══════════════════════════════════════════════════════════════════════════════
+// Layout: header (top 18px) + scrollable list (10 rows × 11px) + footer (bottom 9px)
+// Each row: index (2 chars) + name (up to 12 chars) + 3-colour swatch (14px wide)
+// Controls: joystick UP/DN scroll | BTN select | joystick LEFT = back
+#define TM_ROWS_VIS  9
+#define TM_ROW_H    11
+#define TM_ROW_Y0   19
+
+void drawThemeMenuRow(int idx, int slotY, bool selected) {
+  if(selected)
+    tft.fillRect(0, slotY, 160, TM_ROW_H-1, C_BTN_BG);
+  else
+    tft.fillRect(0, slotY, 160, TM_ROW_H-1, C_BG);
+
+  // Index number
+  tft.setTextSize(1);
+  tft.setTextColor(selected ? C_HOVER : C_BORDER);
+  tft.setCursor(2, slotY+2);
+  if(idx < 10) tft.print('0');
+  tft.print(idx);
+
+  // Theme name from PROGMEM
+  tft.setTextColor(selected ? C_HOVER : C_BTN_HL);
+  tft.setCursor(16, slotY+2);
+  const char* nm = themeName(idx);
+  // print up to 13 chars to avoid overflowing swatch area
+  char buf[14]; strncpy_P(buf, nm, 13); buf[13]=0;
+  tft.print(buf);
+
+  // 3-colour swatch: darkSq | lightSq | cursor — rightmost 14px
+  uint16_t ds = themeField(idx, 1); // darkSq
+  uint16_t ls = themeField(idx, 2); // lightSq
+  uint16_t cu = themeField(idx, 4); // cursor
+  tft.fillRect(144,  slotY, 5, TM_ROW_H-1, ds);
+  tft.fillRect(149,  slotY, 5, TM_ROW_H-1, ls);
+  tft.fillRect(154,  slotY, 6, TM_ROW_H-1, cu);
+
+  // Tick mark for currently active theme
+  if(idx == themeIndex) {
+    tft.setTextColor(C_HOVER);
+    tft.setCursor(138, slotY+2);
+    tft.print('>');
+  }
+}
+
+void showThemeMenu() {
+  // Draw full menu screen
+  tft.fillScreen(C_BG);
+  tft.fillRect(0, 0, 160, 18, C_BTN_BG);
+  tft.setTextSize(1);
+  tft.setTextColor(C_HOVER);
+  tft.setCursor(4, 3);  tft.print("COLOUR THEME");
+  tft.setTextColor(C_BORDER);
+  tft.setCursor(4, 11); tft.print("BTN=select  LEFT=back");
+  tft.drawFastHLine(0, 18, 160, C_BORDER);
+
+  // Footer
+  tft.drawFastHLine(0, 118, 160, C_BORDER);
+  tft.fillRect(0, 119, 160, 9, C_BG);
+  tft.setTextColor(C_BORDER); tft.setTextSize(1);
+  tft.setCursor(4, 120); tft.print("UP/DN scroll");
+
+  uint8_t sel = themeMenuSel;
+
+  // Clamp sel to valid range
+  if(sel >= NUM_THEMES) sel = 0;
+
+  // Draw initial rows
+  int winStart = (int)sel - TM_ROWS_VIS/2;
+  if(winStart < 0) winStart = 0;
+  if(winStart > NUM_THEMES - TM_ROWS_VIS) winStart = NUM_THEMES - TM_ROWS_VIS;
+  if(winStart < 0) winStart = 0;
+
+  for(int slot = 0; slot < TM_ROWS_VIS; slot++) {
+    int idx = winStart + slot;
+    if(idx >= NUM_THEMES) break;
+    drawThemeMenuRow(idx, TM_ROW_Y0 + slot*TM_ROW_H, idx == sel);
+  }
+
+  // Input loop
+  unsigned long lastNav = 0;
+  bool jWasU=false, jWasD=false, jWasL=false, btnWas=false;
+
+  while(true) {
+    bool pressed = (digitalRead(JOY_SW) == LOW);
+    int vx = analogRead(JOY_VRX);
+    int vy = analogRead(JOY_VRY);
+    bool jU = (vy < 1000), jD = (vy > 3000), jL = (vx < 1000);
+
+    if(millis() - lastNav > 160) {
+      uint8_t prevSel = sel;
+
+      if(jU && !jWasU) {
+        if(sel > 0) sel--;
+        lastNav = millis();
+      }
+      if(jD && !jWasD) {
+        if(sel < NUM_THEMES-1) sel++;
+        lastNav = millis();
+      }
+      if(jL && !jWasL) {
+        // Back — return to board without changing theme
+        themeMenuSel = sel;
+        drawAll();
+        return;
+      }
+
+      // Redraw only changed rows if sel moved
+      if(sel != prevSel) {
+        int newWinStart = (int)sel - TM_ROWS_VIS/2;
+        if(newWinStart < 0) newWinStart = 0;
+        if(newWinStart > NUM_THEMES - TM_ROWS_VIS) newWinStart = NUM_THEMES - TM_ROWS_VIS;
+        if(newWinStart < 0) newWinStart = 0;
+
+        // Full redraw only if window shifted, else just update two rows
+        if(newWinStart != winStart) {
+          winStart = newWinStart;
+          for(int slot = 0; slot < TM_ROWS_VIS; slot++) {
+            int idx = winStart + slot;
+            if(idx >= NUM_THEMES) break;
+            drawThemeMenuRow(idx, TM_ROW_Y0 + slot*TM_ROW_H, idx == sel);
+          }
+        } else {
+          // Just repaint old and new highlighted row
+          int oldSlot = (int)prevSel - winStart;
+          int newSlot = (int)sel    - winStart;
+          if(oldSlot >= 0 && oldSlot < TM_ROWS_VIS)
+            drawThemeMenuRow(prevSel, TM_ROW_Y0 + oldSlot*TM_ROW_H, false);
+          if(newSlot >= 0 && newSlot < TM_ROWS_VIS)
+            drawThemeMenuRow(sel,     TM_ROW_Y0 + newSlot*TM_ROW_H, true);
+        }
+      }
+    }
+
+    // Button: select this theme
+    if(pressed && !btnWas) {
+      themeIndex   = sel;
+      themeMenuSel = sel;
+      refreshTheme();
+      drawAll();
+      return;
+    }
+
+    jWasU = jU; jWasD = jD; jWasL = jL; btnWas = pressed;
+    yield(); delay(8);
+  }
+}
 void doRestart() {
   initBoard();
+  themeIndex   = 0;   // reset to default theme (WOOD) on restart
+  themeMenuSel = 0;
+  refreshTheme();
   dispPct = -1;
   panelFocus = 0;
   cursorCol = 4;
@@ -3361,6 +3876,10 @@ void setup() {
   disableCore1WDT();
 
   searchSem = xSemaphoreCreateBinary();
+
+  // Initialise theme colours before any drawing
+  themeIndex = 0;
+  refreshTheme();
 
   // UI-4: Play intro cutscene before game starts
   playIntroCutscene();
