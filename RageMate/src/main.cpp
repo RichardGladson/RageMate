@@ -2641,11 +2641,18 @@ void drawBoard() {
 
 void drawLastMoveOutlines(int from, int to) {
   if(from<0||to<0) return;
-  // Double outline: outer pure white, inner pure black — maximally visible on any theme
-  tft.drawRect(sqX(from)-1, sqY(from)-1, SQ_W+2, SQ_H+2, 0xFFFF);
-  tft.drawRect(sqX(from),   sqY(from),   SQ_W,   SQ_H,   0x0000);
-  tft.drawRect(sqX(to)-1,   sqY(to)-1,   SQ_W+2, SQ_H+2, 0xFFFF);
-  tft.drawRect(sqX(to),     sqY(to),     SQ_W,   SQ_H,   0x0000);
+  // Two outlines, both strictly inside the square (no pixel bleed outside).
+  // Outer rect: theme cursor colour (bright accent, clearly visible).
+  // Inner rect (1px inset): theme bg colour — creates a crisp "gap" that makes
+  // the accent ring pop without looking harsh.
+  auto markSq = [](int sq) {
+    int sx = sqX(sq), sy = sqY(sq);
+    uint16_t sqBg = ((rankOf(sq)+fileOf(sq))%2==0) ? C_DARK_SQ : C_LIGHT_SQ;
+    tft.drawRect(sx,   sy,   SQ_W,   SQ_H,   C_HOVER);   // outer accent
+    tft.drawRect(sx+1, sy+1, SQ_W-2, SQ_H-2, sqBg);      // inner gap (erase inner)
+  };
+  markSq(from);
+  markSq(to);
 }
 
 void drawLegalDots() {
@@ -2679,8 +2686,10 @@ void redrawSquareWithArrow(int sq, int cursorSq=-1) {
   drawSquare(sq);
   if(engineFrom >= 0 && engineTo >= 0) {
     if(sq == engineFrom || sq == engineTo) {
-      tft.drawRect(sqX(sq)-1, sqY(sq)-1, SQ_W+2, SQ_H+2, 0xFFFF);
-      tft.drawRect(sqX(sq),   sqY(sq),   SQ_W,   SQ_H,   0x0000);
+      int sx = sqX(sq), sy = sqY(sq);
+      uint16_t sqBg = ((rankOf(sq)+fileOf(sq))%2==0) ? C_DARK_SQ : C_LIGHT_SQ;
+      tft.drawRect(sx,   sy,   SQ_W,   SQ_H,   C_HOVER);
+      tft.drawRect(sx+1, sy+1, SQ_W-2, SQ_H-2, sqBg);
     }
   }
   if(selSq == sq) tft.drawRect(sqX(sq), sqY(sq), SQ_W, SQ_H, C_SEL);
@@ -3597,9 +3606,13 @@ void handleButton() {
           bPieceMoved &= ~(1ULL << botMove.from);
           bPieceMoved |=  (1ULL << botMove.to);
 
+          // Erase old engine outlines first — draw old squares clean BEFORE
+          // updating engineFrom/engineTo so redrawSquareWithArrow won't re-outline them
           if(engineFrom >= 0) {
-            drawSquare(engineFrom);
-            drawSquare(engineTo);
+            int oldFrom = engineFrom, oldTo = engineTo;
+            engineFrom = -1; engineTo = -1;   // clear so redrawSquareWithArrow skips outline
+            drawSquare(oldFrom);
+            drawSquare(oldTo);
           }
           engineFrom = botMove.from;
           engineTo   = botMove.to;
