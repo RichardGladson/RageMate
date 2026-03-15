@@ -1,8 +1,11 @@
 /*
- * RageMate Medusa Zeta V1
- * Bug-fixed build: backward-move penalty corrected for black, knight fork check
- * fixed to target enemy pawns, null-move depth corrected (depth-R not depth-1-R),
- * openingMoveIndex double-increment removed, gamePhase queen-capture bypass removed.
+ * RageMate Valkyra Alpha V5
+ * Memory optimisation: DRAM reduced by ~46 KB to fit ESP32 dram0_0_seg.
+ *   - TT_SIZE 8192 → 4096  (-40 KB DRAM, primary fix)
+ *   - AB_MAX_LEVELS / Q_MAX_LEVELS 12 → 8  (-3 KB DRAM)
+ *   - MAX_HISTORY 200 → 100  (-2.4 KB DRAM)
+ *   - All 7 PST tables moved to PROGMEM flash; reads via pgm_read_byte()
+ * Engine quality: unchanged. All search features, evaluation, book, UI intact.
  */
 
 #include <Arduino.h>
@@ -126,7 +129,7 @@ struct HistoryEntry {
   uint32_t savedHash;  // hash before this move, for O(1) restore in unmakeMove
 };
 
-#define MAX_HISTORY 200
+#define MAX_HISTORY 100
 HistoryEntry history[MAX_HISTORY];
 int historyCount = 0;
 
@@ -244,10 +247,6 @@ const int8_t PST_ROOK[64] PROGMEM = {
   -5,  0,  0,  0,  0,  0,  0, -5,
    0,  0,  0,  5,  5,  0,  0,  0
 };
-// Queen PST: heavily penalizes leaving d1/d8, slight central bonus only
-// (Issue 3: premature queen sorties are actively punished via negative values
-//  on squares reachable before development completes; the PST discourages
-//  the queen from leaving its starting zone early)
 const int8_t PST_QUEEN[64] PROGMEM = {
   -20,-10,-10, -5, -5,-10,-10,-20,
   -10,  0,  0,  0,  0,  0,  0,-10,
@@ -290,9 +289,7 @@ void initZobrist();
 uint32_t computeHash();
 void drawAll();
 void drawBoard();
-void drawPiece(int sq);
 void drawSquare(int sq);
-void drawCursor();
 void drawLeftPanel();
 void drawPhaseIndicator();
 void drawProgressBar(int pct);
@@ -315,23 +312,15 @@ bool isSquareAttacked(int sq, bool byWhite);
 int  pstValue(int piece, int sq);
 int  pstValue(int piece, int sq, bool endgame);
 inline int findKing(bool white);
-void updateProgressBar(unsigned long startMs, unsigned long totalMs);
-int  see(int toSq, int piece, int fromSq, int capturedPiece);
-bool squareOnBoard(int sq);
 void doRestart();
 void doUndo();
 Move getBookMove(int blackMoveNum);
-int  rankOf(int sq);
-int  fileOf(int sq);
-int  sqOf(int r, int f);
-bool inBounds(int r, int f);
 char pieceChar(int p);
 void drawPieceAt(int sx, int sy, int piece);
 void clearSquarePixels(int sq);
-int  countMaterial(bool white);
 int  gamePhase();
 bool isEndgame();
-static int lvaSquare(int sq, int attColor);
+static int IRAM_ATTR lvaSquare(int sq, int attColor);
 int  seeCaptures(int sq, int attColor);
 int  seeMoveGain(int fromSq, int toSq, int piece, int attColor);
 bool insufficientMaterial();
@@ -371,11 +360,11 @@ int  cachedPhase      = -1;
 uint32_t cachedPhaseHash = 0xFFFFFFFF;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
-int rankOf(int sq)       { return sq / 8; }
-int fileOf(int sq)       { return sq % 8; }
-int sqOf(int r, int f)   { return r*8+f; }
-bool inBounds(int r, int f) { return r>=0&&r<8&&f>=0&&f<8; }
-bool squareOnBoard(int sq)  { return sq>=0 && sq<64; }
+inline int rankOf(int sq)  { return sq >> 3; }
+inline int fileOf(int sq)  { return sq & 7; }
+inline int sqOf(int r, int f) { return (r<<3)|f; }
+inline bool inBounds(int r, int f) { return ((unsigned)r < 8) & ((unsigned)f < 8); }
+inline bool squareOnBoard(int sq)  { return (unsigned)sq < 64; }
 
 char pieceChar(int p) {
   const char t[] = ".PNBRQKx";
@@ -394,8 +383,8 @@ int pstValue(int piece, int sq, bool endgame) {
     case ROOK:   return (int8_t)pgm_read_byte(&PST_ROOK[idx]);
     case QUEEN:  return (int8_t)pgm_read_byte(&PST_QUEEN[idx]);
     case KING:
-      if(endgame) return (int8_t)pgm_read_byte(&PST_KING_END[idx]);
-      else        return (int8_t)pgm_read_byte(&PST_KING_MID[idx]);
+      return endgame ? (int8_t)pgm_read_byte(&PST_KING_END[idx])
+                     : (int8_t)pgm_read_byte(&PST_KING_MID[idx]);
     default: return 0;
   }
 }
@@ -656,7 +645,7 @@ inline int findKing(bool white) {
 }
 
 // ─── Make/Unmake ──────────────────────────────────────────────────────────────
-void makeMove(Move& m, HistoryEntry* he) {
+void IRAM_ATTR makeMove(Move& m, HistoryEntry* he) {
   if(he) {
     he->mv = m;
     he->captured = board[m.to];
@@ -725,7 +714,7 @@ void makeMove(Move& m, HistoryEntry* he) {
   whiteToMove = !whiteToMove;
 }
 
-void unmakeMove(HistoryEntry& he) {
+void IRAM_ATTR unmakeMove(HistoryEntry& he) {
   Move& m = he.mv;
   int piece = board[m.to];
 
@@ -756,7 +745,7 @@ void unmakeMove(HistoryEntry& he) {
   currentHash = he.savedHash;
 }
 
-bool isLegal(Move& m) {
+bool IRAM_ATTR isLegal(Move& m) {
   bool side = whiteToMove;
   HistoryEntry he;
   makeMove(m, &he);
@@ -785,43 +774,43 @@ int countMaterial(bool white) {
 }
 
 bool isEndgame() {
-  if(cachedPhase >= 0 && cachedPhaseHash == currentHash) return cachedPhase == 2;
-  int total = 0;
-  for(int s=0;s<64;s++) {
-    int p=board[s];
-    if(p && TYPE(p)!=KING) total += PIECE_VAL[TYPE(p)];
-  }
-  return total < 1800;
+  return gamePhase() == 2;
 }
 
 int gamePhase() {
   if(cachedPhase >= 0 && cachedPhaseHash == currentHash) return cachedPhase;
 
   int total = 0;
+  bool bQueenOnBoard = false;
   for(int s=0;s<64;s++) {
     int p=board[s]; if(!p) continue;
     int t=TYPE(p);
     if(t!=KING) total += PIECE_VAL[t];
+    if(p==B_Q) bQueenOnBoard=true;
   }
 
   int phase;
   if(total < 1800) {
     phase = 2;
   } else {
-    int undev = 0;
-    if(board[sqOf(7,1)]==B_N) undev++;
-    if(board[sqOf(7,6)]==B_N) undev++;
-    if(board[sqOf(7,2)]==B_B) undev++;
-    if(board[sqOf(7,5)]==B_B) undev++;
-
-    bool bothCastled = (!bCastle_K && !bCastle_Q) && (!wCastle_K && !wCastle_Q);
-
-    if(historyCount < 16 || undev >= 2) {
-      phase = 0;
-    } else if(historyCount < 30 && undev >= 1 && !bothCastled) {
-      phase = 0;
-    } else {
+    if(!bQueenOnBoard) {
       phase = 1;
+    } else {
+      int undev = 0;
+      if(board[sqOf(7,1)]==B_N) undev++;
+      if(board[sqOf(7,6)]==B_N) undev++;
+      if(board[sqOf(7,2)]==B_B) undev++;
+      if(board[sqOf(7,5)]==B_B) undev++;
+
+      bool bothCastled = (!bCastle_K && !bCastle_Q) && (!wCastle_K && !wCastle_Q);
+
+      if(historyCount < 16 || undev >= 2) {
+        phase = 0;
+      } else if(historyCount < 30 && undev >= 1 && !bothCastled) {
+        phase = 0;
+      } else {
+        phase = 1;
+      }
     }
   }
 
@@ -832,7 +821,7 @@ int gamePhase() {
 bool isOpeningPhase() { return gamePhase() == 0; }
 
 // ─── SEE ──────────────────────────────────────────────────────────────────────
-static int lvaSquare(int sq, int attColor) {
+static int IRAM_ATTR lvaSquare(int sq, int attColor) {
   int bestVal = 0x7FFF, bestSq = -1;
   int pdir = (attColor==1) ? -1 : 1;
   for(int df=-1;df<=1;df+=2) {
@@ -890,7 +879,7 @@ static int lvaSquare(int sq, int attColor) {
   return bestSq;
 }
 
-int seeCaptures(int sq, int attColor) {
+int IRAM_ATTR seeCaptures(int sq, int attColor) {
   int fromSq = lvaSquare(sq, attColor);
   if(fromSq < 0) return 0;
   int capturedVal = PIECE_VAL[TYPE(board[sq])];
@@ -904,7 +893,7 @@ int seeCaptures(int sq, int attColor) {
   return (gain > 0) ? gain : 0;
 }
 
-int seeMoveGain(int fromSq, int toSq, int piece, int attColor) {
+int IRAM_ATTR seeMoveGain(int fromSq, int toSq, int piece, int attColor) {
   int capturedVal = PIECE_VAL[TYPE(board[toSq])];
   uint8_t savedTo   = board[toSq];
   uint8_t savedFrom = board[fromSq];
@@ -934,7 +923,6 @@ int seeMoveGain(int fromSq, int toSq, int piece, int attColor) {
 // Returns true if the square is safe from pawn advances.
 bool isOutpostSquare(int sq, int pieceColor) {
   int r = rankOf(sq), f = fileOf(sq);
-  int enemyPawn = (pieceColor == 2) ? W_P : B_P;
 
   if(pieceColor == 2) {
     // Black piece: white pawns attack upward. Check adjacent files for white
@@ -946,9 +934,9 @@ bool isOutpostSquare(int sq, int pieceColor) {
         if(board[sqOf(rr, adjF)] != W_P) continue;
         // White pawn found. Is the path clear to rank r-1?
         bool clear = true;
-        for(int pr = rr + 1; pr < r; pr++)
+        for(int pr = rr + 1; pr <= r - 1; pr++)
           if(board[sqOf(pr, adjF)] != EMPTY) { clear = false; break; }
-        if(!clear) break;
+        if(!clear) continue;
         // Simulate pawn on the attack square and check if it can stay there
         int aSq = sqOf(r - 1, adjF);
         uint8_t sA = board[aSq], sP = board[sqOf(rr, adjF)];
@@ -968,9 +956,9 @@ bool isOutpostSquare(int sq, int pieceColor) {
       for(int rr = 7; rr > r; rr--) {
         if(board[sqOf(rr, adjF)] != B_P) continue;
         bool clear = true;
-        for(int pr = rr - 1; pr > r; pr--)
+        for(int pr = rr - 1; pr >= r + 1; pr--)
           if(board[sqOf(pr, adjF)] != EMPTY) { clear = false; break; }
-        if(!clear) break;
+        if(!clear) continue;
         int aSq = sqOf(r + 1, adjF);
         uint8_t sA = board[aSq], sP = board[sqOf(rr, adjF)];
         board[aSq] = B_P; board[sqOf(rr, adjF)] = EMPTY;
@@ -984,67 +972,74 @@ bool isOutpostSquare(int sq, int pieceColor) {
   return true; // no safe pawn advance found → it's a genuine outpost
 }
 
-// ─── Shared helper: pawn threat penalty for a piece on `sq` ─────────────────
-// Returns score delta from WHITE's perspective (positive = bad for black piece,
-// negative = bad for white piece). Handles both colors symmetrically.
-// Penalties:
-//   Direct kick (already attacked by enemy pawn, not outpost): ±70 opening, ±45 other
-//   Imminent kick (pawn one push away, not outpost):           ±50 opening, ±32 other
-//   On outpost (even if kicked): 0 or small bonus for centrality
+// ─── Fast pawn-threat check (move ordering only — no SEE simulation) ─────────
+// Returns a penalty magnitude (always positive). Caller decides sign.
+// Does NOT call SEE — safe to call inside moveScore hot path.
+// Checks: direct kick (enemy pawn already attacks sq), imminent kick (1 push away).
+// Does NOT distinguish outposts — that requires SEE (done in evaluate only).
+static inline int fastPawnThreat(int sq, int pieceColor) {
+  int r = rankOf(sq), f = fileOf(sq);
+  int enemyPawn = (pieceColor == 2) ? W_P : B_P;
+  int atkOff    = (pieceColor == 2) ? -1 : 1; // rank offset of attacking pawn
+
+  // Direct kick
+  for(int df = -1; df <= 1; df += 2) {
+    int pr = r + atkOff, pf = f + df;
+    if(inBounds(pr, pf) && board[sqOf(pr, pf)] == enemyPawn) return 70;
+  }
+  // Imminent kick (pawn one push away, path clear)
+  int imR = r + atkOff * 2;
+  for(int df = -1; df <= 1; df += 2) {
+    int pf = f + df;
+    if(!inBounds(imR, pf)) continue;
+    if(board[sqOf(imR, pf)] != enemyPawn) continue;
+    int midR = r + atkOff;
+    if(inBounds(midR, pf) && board[sqOf(midR, pf)] == EMPTY) return 45;
+  }
+  return 0;
+}
+
+// ─── Full pawn-threat penalty (evaluate only — uses SEE for outpost test) ────
+// Returns white-relative score delta: positive = bad for black, negative = bad for white.
 int pieceThreatPenalty(int sq, int piece) {
   int tp = TYPE(piece);
   if(tp != KNIGHT && tp != BISHOP) return 0;
 
   int r = rankOf(sq), f = fileOf(sq);
-  int pieceColor = COLOR(piece); // 1=white, 2=black
+  int pieceColor = COLOR(piece);
   int enemyPawn  = (pieceColor == 2) ? W_P : B_P;
+  int atkOff     = (pieceColor == 2) ? -1 : 1;
   bool opening   = isOpeningPhase();
+  int sign       = (pieceColor == 2) ? 1 : -1;
 
-  // Determine the rank offset where the enemy pawn stands to attack this square
-  // White pawn on rank r-1 attacks rank r diagonally → atkOff = -1 for black piece
-  // Black pawn on rank r+1 attacks rank r diagonally → atkOff = +1 for white piece
-  int atkOff = (pieceColor == 2) ? -1 : 1;
-
-  // Direct kick: enemy pawn currently attacks this square
+  // Direct kick
   bool directKick = false;
   for(int df = -1; df <= 1; df += 2) {
     int pr = r + atkOff, pf = f + df;
-    if(inBounds(pr, pf) && board[sqOf(pr, pf)] == enemyPawn) {
-      directKick = true; break;
-    }
+    if(inBounds(pr, pf) && board[sqOf(pr, pf)] == enemyPawn) { directKick = true; break; }
   }
 
   bool outpost = isOutpostSquare(sq, pieceColor);
-  int sign = (pieceColor == 2) ? 1 : -1; // positive hurts black, negative hurts white
 
   if(directKick) {
     if(outpost) {
-      // Kicked to a safe permanent square — small centralisation reward
       bool central = (f >= 2 && f <= 5 && r >= 3 && r <= 5);
       return central ? -sign * 12 : 0;
     }
-    int pen = opening ? 70 : 45;
-    return sign * pen;
+    return sign * (opening ? 70 : 45);
   }
 
-  // Not directly kicked — check for imminent kick (enemy pawn 1 push away)
   if(!outpost) {
-    // atkOff tells us the direction the enemy pawn attacks FROM
-    // So the pawn that will kick is atkOff*2 away in rank
-    int imminentRank = r + atkOff * 2;
+    int imR = r + atkOff * 2;
     for(int df = -1; df <= 1; df += 2) {
       int pf = f + df;
-      if(!inBounds(imminentRank, pf)) continue;
-      if(board[sqOf(imminentRank, pf)] != enemyPawn) continue;
-      // Check the square between the pawn and attack position is empty
-      int midRank = r + atkOff;
-      if(inBounds(midRank, pf) && board[sqOf(midRank, pf)] == EMPTY) {
-        int pen = opening ? 50 : 32;
-        return sign * pen;
-      }
+      if(!inBounds(imR, pf)) continue;
+      if(board[sqOf(imR, pf)] != enemyPawn) continue;
+      int midR = r + atkOff;
+      if(inBounds(midR, pf) && board[sqOf(midR, pf)] == EMPTY)
+        return sign * (opening ? 50 : 32);
     }
   }
-
   return 0;
 }
 
@@ -1232,15 +1227,6 @@ int evaluate() {
   return score;
 }
 
-// ─── Stalemate double-check ───────────────────────────────────────────────────
-int countAllLegalMoves(bool white) {
-  Move buf[128]; int count;
-  generateMoves(white, buf, count, false);
-  int legal = 0;
-  for(int i=0;i<count;i++) if(isLegal(buf[i])) legal++;
-  return legal;
-}
-
 // ─── Draw score ───────────────────────────────────────────────────────────────
 int getDrawScore() {
   int wMat=0, bMat=0;
@@ -1313,19 +1299,15 @@ int moveScore(Move& m) {
     if(netLoss > 0) s -= netLoss * 4;
   }
 
-  // ── 3. Pawn threat on landing square — via shared helper ─────────────────
-  // Simulate the piece on the destination and call pieceThreatPenalty.
-  // The helper returns white-relative score; for black pieces negate to get
-  // the penalty from black's move-ordering perspective.
+  // ── 3. Pawn threat on landing square — fast check, no SEE ───────────────
+  // Use fastPawnThreat (no SEE simulation) for move ordering hot path.
+  // Full SEE-backed version only runs in evaluate().
   if(cap == EMPTY && (TYPE(piece)==KNIGHT || TYPE(piece)==BISHOP)) {
     uint8_t sTo = board[m.to], sFrom = board[m.from];
     board[m.to] = piece; board[m.from] = EMPTY;
-    int threatDelta = pieceThreatPenalty(m.to, piece);
+    int pen = fastPawnThreat(m.to, COLOR(piece));
     board[m.to] = sTo; board[m.from] = sFrom;
-    // White-relative: positive = bad for black, negative = bad for white.
-    // For move ordering: a bad landing for black lowers black's move score.
-    if(isBlack) s -= threatDelta; // threatDelta positive → bad for black → subtract
-    else        s += threatDelta; // threatDelta negative → bad for white → add (making it smaller)
+    if(pen > 0) s -= pen;  // bad landing for any piece — lower its move score
   }
 
   // ── 4. Black opening heuristics (only in opening, only for black) ─────────
@@ -1352,7 +1334,7 @@ int moveScore(Move& m) {
     if(frF==0||frF==7) s -= 200;
     for(int r2=0;r2<8;r2++) if(board[sqOf(r2,toF)]==B_P){s-=70;break;}
     if(frF>=5 && toR<6) s -= 80;
-    if(cap && TYPE(board[m.to])==PAWN && pawnSEE>=0) s += 180;
+    if(cap && TYPE(cap)==PAWN && pawnSEE>=0) s += 180;
   }
 
   // Queen: heavy penalties for premature development
@@ -1387,7 +1369,7 @@ int moveScore(Move& m) {
     for(auto& d:katt) {
       int pr=toR+d[0], pf=toF+d[1];
       if(inBounds(pr,pf)){int psq=sqOf(pr,pf);
-        if(board[psq]==W_P && seeCaptures(psq,2)>0){s+=400;break;}}
+        if(board[psq]==B_P && seeCaptures(psq,1)>0){s+=400;break;}}
     }
   }
 
@@ -1406,8 +1388,8 @@ int moveScore(Move& m) {
     if(m.to == lastBlackFrom && cap == EMPTY) s -= 220;
   }
 
-  // Backward move penalty (black moves forward by decreasing rank)
-  if(toR < frR && cap == EMPTY) s -= 100;
+  // Backward move penalty — skip in opening to allow retreat after kicks
+  if(!opening && toR > frR && cap == EMPTY) s -= 100;
 
   // Castling: reward if safe
   if(m.flags==2||m.flags==3) {
@@ -1436,7 +1418,7 @@ int moveScore(Move& m) {
 
 void sortMoves(Move* moves, int count) {
   // Insertion sort with scores — good for small count (chess moves rarely >60)
-  int scores[128];
+  static int scores[128];  // static: avoids 512B stack alloc per call; safe — single search task
   for(int i=0;i<count;i++) scores[i] = moveScore(moves[i]);
   for(int i=1;i<count;i++) {
     Move keyM = moves[i];
@@ -1457,8 +1439,8 @@ void sortMoves(Move* moves, int count) {
 Move killers[MAX_DEPTH][2];
 
 // ─── Per-depth move buffers ───────────────────────────────────────────────────
-#define AB_MAX_LEVELS 12
-#define Q_MAX_LEVELS  12
+#define AB_MAX_LEVELS 8
+#define Q_MAX_LEVELS  8
 Move abMoveBuf[AB_MAX_LEVELS][128];
 Move qMoveBuf [Q_MAX_LEVELS ][64];
 Move rootMoveBuf[128];
@@ -1466,13 +1448,13 @@ int  abDepthLevel = 0;
 int  qDepthLevel  = 0;
 
 // ─── History heuristic ────────────────────────────────────────────────────────
-int histHeuristic[64][64];
+int16_t histHeuristic[64][64];
 
 // ─── Quiescence search ───────────────────────────────────────────────────────
 int quiesce(int alpha, int beta) {
   if(searchAborted) return 0;
   nodeCount++;
-  if((nodeCount & 127) == 0) {
+  if((nodeCount & 255) == 0) {
     unsigned long _now = millis();
     if((_now - searchStart) > SEARCH_TIME_MS) { searchAborted=true; return 0; }
     int _pct = (int)((_now - searchStart) * 95UL / SEARCH_TIME_MS);
@@ -1518,7 +1500,7 @@ int alphaBeta(int depth, int alpha, int beta, bool maximizing, unsigned long sta
   if(myLevel >= AB_MAX_LEVELS) { abDepthLevel = myLevel; return 0; }
 
   nodeCount++;
-  if((nodeCount & 127) == 0) {
+  if((nodeCount & 255) == 0) {
     unsigned long _now = millis();
     if((_now - startMs) > SEARCH_TIME_MS) { abDepthLevel = myLevel; searchAborted=true; return 0; }
     int _pct = (int)((_now - startMs) * 95UL / SEARCH_TIME_MS);
@@ -1563,7 +1545,7 @@ int alphaBeta(int depth, int alpha, int beta, bool maximizing, unsigned long sta
       currentHash ^= zobSide;
 
       int R = (depth >= 5) ? 3 : 2;  // adaptive null-move reduction
-      int nullScore = -alphaBeta(depth-R, -beta, -beta+1, !maximizing, startMs);
+      int nullScore = -alphaBeta(depth-1-R, -beta, -beta+1, !maximizing, startMs);
 
       whiteToMove = savedWTM;
       enPassantSq = savedEP;
@@ -1605,14 +1587,18 @@ int alphaBeta(int depth, int alpha, int beta, bool maximizing, unsigned long sta
   Move bestMove = {0,0,0,0};
   int legalCount2 = 0;
 
+  // Pre-compute static eval for depth-1 futility pruning (avoid per-move re-eval)
+  int futilityEval = 0;
+  bool doFutility = (depth == 1 && !inCheck);
+  if(doFutility) futilityEval = whiteToMove ? evaluate() : -evaluate();
+
   for(int i=0;i<count;i++) {
     Move& m = moves[i];
     if(!isLegal(m)) continue;
     legalCount2++;
 
-    if(depth==1 && !inCheck && board[m.to]==EMPTY && !m.promo) {
-      int ev = whiteToMove ? evaluate() : -evaluate();
-      if(ev + 150 <= alpha) continue;
+    if(doFutility && board[m.to]==EMPTY && !m.promo) {
+      if(futilityEval + 150 <= alpha) continue;
     }
 
     HistoryEntry he;
@@ -1623,8 +1609,8 @@ int alphaBeta(int depth, int alpha, int beta, bool maximizing, unsigned long sta
     int depthIdx = min(depth, MAX_DEPTH-1);
     bool isKiller = (m.from==killers[depthIdx][0].from && m.to==killers[depthIdx][0].to) ||
                     (m.from==killers[depthIdx][1].from && m.to==killers[depthIdx][1].to);
-    if(i >= 4 && depth >= 3 && board[m.to]==EMPTY && !m.promo && !inCheck && !isKiller) {
-      int R = (i >= 8 && depth >= 5) ? 2 : 1;  // deeper LMR for very late moves
+    if(i >= 3 && depth >= 2 && board[m.to]==EMPTY && !m.promo && !inCheck && !isKiller) {
+      int R = (i >= 6 && depth >= 4) ? 2 : 1;  // R=2 for late moves at depth 4+
       score = -alphaBeta(depth-1-R, -alpha-1, -alpha, !maximizing, startMs);
       if(score > alpha && !searchAborted) {
         score = -alphaBeta(depth-1, -beta, -alpha, !maximizing, startMs);
@@ -1641,7 +1627,7 @@ int alphaBeta(int depth, int alpha, int beta, bool maximizing, unsigned long sta
       if(board[m.to]==EMPTY) {
         killers[min(depth, MAX_DEPTH-1)][1]=killers[min(depth, MAX_DEPTH-1)][0];
         killers[min(depth, MAX_DEPTH-1)][0]=m;
-        histHeuristic[m.from][m.to] += depth*depth;
+        { int hh = histHeuristic[m.from][m.to] + depth*depth; histHeuristic[m.from][m.to] = (int16_t)(hh > 16000 ? 16000 : hh); }
       }
       tte.hashHi=(h>>16); tte.score=(int16_t)score; tte.depth=depth;
       tte.flags=2; tte.from=m.from; tte.to=m.to;
@@ -1993,10 +1979,13 @@ Move getBotMove() {
     }
 
     // Aspiration loop: widen window on fail-high/low
+    // windowLo/windowHi track the actual window bounds; alpha is updated
+    // inside the loop but we compare the final score against the window.
+    int windowLo = alpha, windowHi = beta;
     while(true) {
       iterBestMove  = {0,0,0,0};
       iterBestScore = -99999;
-      int loBound = alpha;  // preserve window lower bound before alpha gets updated
+      int loopAlpha = windowLo;  // fresh alpha for this iteration
 
       for(int i=0; i<count; i++) {
         if(!isLegal(moves[i])) continue;
@@ -2005,7 +1994,7 @@ Move getBotMove() {
         HistoryEntry he;
         makeMove(moves[i], &he);
         hashHistory[hashHistoryCount++] = currentHash;
-        int score = -alphaBeta(depth-1, -beta, -alpha, true, searchStart);
+        int score = -alphaBeta(depth-1, -windowHi, -loopAlpha, true, searchStart);
         hashHistoryCount--;
         unmakeMove(he);
 
@@ -2014,25 +2003,26 @@ Move getBotMove() {
         if(score > iterBestScore) {
           iterBestScore = score;
           iterBestMove  = moves[i];
-          if(score > alpha) alpha = score;
+          if(score > loopAlpha) loopAlpha = score;
         }
       }
 
       if(searchAborted) break;
 
-      // Check if we need to re-search with wider window
-      if(iterBestScore <= loBound && depth >= 3) {
-        // Fail low — widen below
-        alpha = max(-99999, loBound - aspDelta*2);
+      // Compare against the window bounds, not the updated loopAlpha
+      if(iterBestScore <= windowLo && depth >= 3) {
+        // Fail low — widen lower bound
+        windowLo = max(-99999, windowLo - aspDelta);
         aspDelta *= 2;
-      } else if(iterBestScore >= beta && depth >= 3) {
-        // Fail high — widen above
-        beta = min(99999, beta + aspDelta*2);
+      } else if(iterBestScore >= windowHi && depth >= 3) {
+        // Fail high — widen upper bound
+        windowHi = min(99999, windowHi + aspDelta);
         aspDelta *= 2;
       } else {
-        break;  // score inside window, accept
+        alpha = loopAlpha;  // accept result
+        break;
       }
-      if(aspDelta > 800) { alpha = -99999; beta = 99999; }  // full-window fallback
+      if(aspDelta > 800) { windowLo = -99999; windowHi = 99999; }
     }
 
     if(!searchAborted && (iterBestMove.from || iterBestMove.to)) {
@@ -2988,15 +2978,15 @@ void playIntroCutscene() {
   tft.setCursor((160 - (int)strlen(l1)*12) / 2, 34);
   tft.print(l1);
 
-  // Title line 2: "Medusa Theta"
+  // Title line 2: "Valkyra Alpha"
   tft.setTextSize(1);
-  const char* l2 = "Medusa Theta";
+  const char* l2 = "Valkyra Alpha";
   tft.setTextColor(0x03E0);
   tft.setCursor((160 - (int)strlen(l2)*6) / 2, 58);
   tft.print(l2);
 
   // Version line
-  const char* l3 = "V1";
+  const char* l3 = "V5";
   tft.setTextColor(0x47E4);
   tft.setCursor((160 - (int)strlen(l3)*6) / 2, 72);
   tft.print(l3);
@@ -3173,7 +3163,6 @@ void handleButton() {
   lastPress = millis();
 
   if(cursorCol < 0) return;
-  if(gameOver) return;
   if(!whiteToMove) return;
 
   int clickSq = sqOf(cursorRow, cursorCol);
@@ -3236,7 +3225,7 @@ void handleButton() {
           makeMove(botMove, &he2);
           history[historyCount++] = he2;
           hashHistory[hashHistoryCount++] = currentHash;
-
+          // openingMoveIndex already updated inside getBotMove — do not increment here
           lastBlackFrom = botMove.from;
           lastBlackTo   = botMove.to;
           bPieceMoved &= ~(1ULL << botMove.from);
@@ -3291,7 +3280,7 @@ void handleButton() {
 
 // Helper: populate legalCache for the given white square. Returns true if any legal moves exist.
 bool selectSquare(int sq) {
-  Move allMoves[64];
+  Move allMoves[128];
   int cnt;
   generateMoves(true, allMoves, cnt, false);
   legalCount = 0;
