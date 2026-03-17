@@ -1,10 +1,13 @@
 /*
  * RageMate Valkyra Beta V3
- * Changes from V6:
- *   - Theme menu: dynamic hold-scroll (UP/DN), hold-left progress bar to go back
- *   - Engine last-move highlight: doubled outline thickness, always pure white + black
- *   - UND panel: 'D' now uses C_HOVER (always fully visible)
- *   - Intro/splash updated to Beta V3
+ * Engine revamp (V3.1):
+ *   - evaluate(): fully symmetrical for both colours, stronger king safety (40pts/file),
+ *     queen safety penalty, endgame king-push, unified pawn structure
+ *   - moveScore(): opening heuristics now apply to BOTH colours (was black-only),
+ *     queen retreat penalty (all phases), stronger castling reward,
+ *     far-advanced unstable knight penalty, history heuristic integrated
+ *   - Fixes: Ng4 instability, Qa5+ tempo loss, Nxd4 horizon, Qd8 retreat,
+ *     colour asymmetry causing worse play vs stronger opponents
  */
 
 #include <Arduino.h>
@@ -656,31 +659,6 @@ uint32_t currentHash;
 // ─── Progress bar ───────────────────────────────────────────────────────────
 int8_t dispPct = -1;
 
-// Progress bar gradient — starts at visible dim-green, rises evenly to bright
-// No near-black at the base; all segments visible. 96 entries, RGB565.
-// Ramps from a soft forest green (0x0260) through to a steady bright green (0x05E0),
-// avoiding both the near-invisible start and the blinding white-wash top.
-const uint16_t PROGMEM pbGrad[96] = {
-  // 0-15: soft dim green — always clearly visible on the display
-  0x0260,0x0280,0x02A0,0x02C0,0x02E0,0x0300,0x0320,0x0340,
-  0x0360,0x0380,0x03A0,0x03A0,0x03C0,0x03C0,0x03E0,0x03E0,
-  // 16-31: lower-mid green
-  0x03E0,0x03E0,0x04A0,0x04C0,0x04E0,0x04E0,0x0500,0x0500,
-  0x0520,0x0520,0x0540,0x0540,0x0560,0x0560,0x0580,0x0580,
-  // 32-47: mid green rising steadily
-  0x0580,0x05A0,0x05A0,0x05C0,0x05C0,0x05C0,0x05E0,0x05E0,
-  0x05E0,0x05E0,0x05E0,0x05E0,0x05E0,0x05E0,0x05E0,0x05E0,
-  // 48-63: hold at confident bright-mid green
-  0x05E0,0x05E0,0x05E0,0x05E0,0x05E0,0x05E0,0x05E0,0x05E0,
-  0x05E0,0x05E0,0x05E0,0x05E0,0x05E0,0x05E0,0x05E0,0x05E0,
-  // 64-79: ease up to full green
-  0x05E0,0x06A0,0x06C0,0x06E0,0x0700,0x0720,0x0740,0x0760,
-  0x0780,0x07A0,0x07C0,0x07C0,0x07E0,0x07E0,0x07E0,0x07E0,
-  // 80-95: settle at bright green — no white blow-out
-  0x07E0,0x07E0,0x07E0,0x07E0,0x07E0,0x07E0,0x07E0,0x07E0,
-  0x07E0,0x07E0,0x07E0,0x07E0,0x07E0,0x07E0,0x07E0,0x07E0,
-};
-
 // ─── UI state ───────────────────────────────────────────────────────────────
 int  cursorCol = 4;
 int  cursorRow = 4;
@@ -793,7 +771,6 @@ void drawAll();
 void drawBoard();
 void drawSquare(int sq);
 void drawLeftPanel();
-void drawPhaseIndicator();
 void drawProgressBar(int pct);
 void drawLastMoveOutlines(int from, int to);
 void drawLegalDots();
@@ -1285,36 +1262,37 @@ int gamePhase() {
   if(cachedPhase >= 0 && cachedPhaseHash == currentHash) return cachedPhase;
 
   int total = 0;
-  bool bQueenOnBoard = false;
   for(int s=0;s<64;s++) {
     int p=board[s]; if(!p) continue;
     int t=TYPE(p);
     if(t!=KING) total += PIECE_VAL[t];
-    if(p==B_Q) bQueenOnBoard=true;
   }
 
   int phase;
   if(total < 1800) {
-    phase = 2;
+    phase = 2; // endgame
   } else {
-    if(!bQueenOnBoard) {
-      phase = 1;
+    // Count undeveloped minors for BOTH sides
+    int undevBlack = 0, undevWhite = 0;
+    if(board[sqOf(7,1)]==B_N) undevBlack++;
+    if(board[sqOf(7,6)]==B_N) undevBlack++;
+    if(board[sqOf(7,2)]==B_B) undevBlack++;
+    if(board[sqOf(7,5)]==B_B) undevBlack++;
+    if(board[sqOf(0,1)]==W_N) undevWhite++;
+    if(board[sqOf(0,6)]==W_N) undevWhite++;
+    if(board[sqOf(0,2)]==W_B) undevWhite++;
+    if(board[sqOf(0,5)]==W_B) undevWhite++;
+    int undev = undevBlack + undevWhite; // total both sides
+
+    bool bothCastled = (!bCastle_K && !bCastle_Q) && (!wCastle_K && !wCastle_Q);
+
+    // Opening: either side still has 2+ undeveloped minors, or very early game
+    if(historyCount < 16 || undev >= 4) {
+      phase = 0;
+    } else if(historyCount < 30 && undev >= 2 && !bothCastled) {
+      phase = 0;
     } else {
-      int undev = 0;
-      if(board[sqOf(7,1)]==B_N) undev++;
-      if(board[sqOf(7,6)]==B_N) undev++;
-      if(board[sqOf(7,2)]==B_B) undev++;
-      if(board[sqOf(7,5)]==B_B) undev++;
-
-      bool bothCastled = (!bCastle_K && !bCastle_Q) && (!wCastle_K && !wCastle_Q);
-
-      if(historyCount < 16 || undev >= 2) {
-        phase = 0;
-      } else if(historyCount < 30 && undev >= 1 && !bothCastled) {
-        phase = 0;
-      } else {
-        phase = 1;
-      }
+      phase = 1; // middlegame
     }
   }
 
@@ -1549,26 +1527,30 @@ int pieceThreatPenalty(int sq, int piece) {
 
 // ─── Evaluation ───────────────────────────────────────────────────────────────
 // White-relative: positive = good for white, negative = good for black.
-// Single clean pass — no accumulated layers, no early returns.
+// Fully symmetrical. Phase-independent safety checks applied at all times.
 int evaluate() {
   int score = 0;
   bool endgame = isEndgame();
   bool opening = isOpeningPhase();
 
   int wKsq = -1, bKsq = -1, wb = 0, bb = 0;
+  int wMat = 0, bMat = 0;
 
   // ── Material + PST ────────────────────────────────────────────────────────
   for(int s = 0; s < 64; s++) {
     int p = board[s]; if(!p) continue;
-    int val = PIECE_VAL[TYPE(p)] + pstValue(p, s, endgame);
+    int t = TYPE(p);
+    int val = PIECE_VAL[t] + pstValue(p, s, endgame);
     if(IS_WHITE(p)) {
       score += val;
-      if(TYPE(p) == BISHOP) wb++;
-      if(TYPE(p) == KING)   wKsq = s;
+      if(t == BISHOP) wb++;
+      if(t == KING)   wKsq = s;
+      if(t != KING)   wMat += PIECE_VAL[t];
     } else {
       score -= val;
-      if(TYPE(p) == BISHOP) bb++;
-      if(TYPE(p) == KING)   bKsq = s;
+      if(t == BISHOP) bb++;
+      if(t == KING)   bKsq = s;
+      if(t != KING)   bMat += PIECE_VAL[t];
     }
   }
 
@@ -1576,344 +1558,437 @@ int evaluate() {
   if(wb >= 2) score += 30;
   if(bb >= 2) score -= 30;
 
-  // ── Doubled pawns ─────────────────────────────────────────────────────────
+  // ── Pawn structure ────────────────────────────────────────────────────────
+  bool wFile[8] = {}, bFile[8] = {};
+  int  wFileCnt[8] = {}, bFileCnt[8] = {};
   for(int f = 0; f < 8; f++) {
-    int wp = 0, bp = 0;
     for(int r = 0; r < 8; r++) {
-      if(board[sqOf(r,f)] == W_P) wp++;
-      if(board[sqOf(r,f)] == B_P) bp++;
+      if(board[sqOf(r,f)] == W_P) { wFile[f]=true; wFileCnt[f]++; }
+      if(board[sqOf(r,f)] == B_P) { bFile[f]=true; bFileCnt[f]++; }
     }
-    if(wp > 1) score -= 20 * (wp - 1);
-    if(bp > 1) score += 20 * (bp - 1);
+    if(wFileCnt[f] > 1) score -= 22 * (wFileCnt[f]-1);
+    if(bFileCnt[f] > 1) score += 22 * (bFileCnt[f]-1);
   }
 
-  // ── Passed pawns ──────────────────────────────────────────────────────────
+  // Isolated pawns
+  for(int f = 0; f < 8; f++) {
+    bool wAdj = (f>0 && wFile[f-1]) || (f<7 && wFile[f+1]);
+    bool bAdj = (f>0 && bFile[f-1]) || (f<7 && bFile[f+1]);
+    if(wFile[f] && !wAdj) score -= 22;
+    if(bFile[f] && !bAdj) score += 22;
+  }
+
+  // Passed + backward pawns
   int passedScale = endgame ? 2 : 1;
   for(int s = 0; s < 64; s++) {
     int p = board[s]; if(TYPE(p) != PAWN) continue;
     int r = rankOf(s), f = fileOf(s);
-    bool passed = true;
     if(IS_WHITE(p)) {
-      for(int rr = r+1; rr < 8 && passed; rr++)
-        for(int ff = f-1; ff <= f+1; ff++)
-          if(ff >= 0 && ff < 8 && board[sqOf(rr,ff)] == B_P) passed = false;
-      if(passed) score += passedScale * (20 + r * 10);
-    } else {
-      for(int rr = r-1; rr >= 0 && passed; rr--)
-        for(int ff = f-1; ff <= f+1; ff++)
-          if(ff >= 0 && ff < 8 && board[sqOf(rr,ff)] == W_P) passed = false;
-      if(passed) score -= passedScale * (20 + (7 - r) * 10);
-    }
-  }
-
-  // ── Isolated pawns ────────────────────────────────────────────────────────
-  {
-    bool wFile[8] = {}, bFile[8] = {};
-    for(int f = 0; f < 8; f++) for(int r = 0; r < 8; r++) {
-      if(board[sqOf(r,f)] == W_P) wFile[f] = true;
-      if(board[sqOf(r,f)] == B_P) bFile[f] = true;
-    }
-    for(int f = 0; f < 8; f++) {
-      bool wAdj = (f > 0 && wFile[f-1]) || (f < 7 && wFile[f+1]);
-      bool bAdj = (f > 0 && bFile[f-1]) || (f < 7 && bFile[f+1]);
-      if(wFile[f] && !wAdj) score -= 20;
-      if(bFile[f] && !bAdj) score += 20;
-    }
-  }
-
-  // ── Backward pawns ────────────────────────────────────────────────────────
-  for(int s = 0; s < 64; s++) {
-    int p = board[s]; if(TYPE(p) != PAWN) continue;
-    int r = rankOf(s), f = fileOf(s);
-    if(IS_WHITE(p)) {
-      bool supported = false;
-      for(int df = -1; df <= 1; df += 2) { int af = f+df; if(af<0||af>7) continue;
-        for(int rr = 0; rr <= r; rr++) if(board[sqOf(rr,af)]==W_P){supported=true;break;} if(supported) break; }
-      bool frontAtk = false; int fr = r+1;
-      for(int df=-1;df<=1;df+=2){int af=f+df;if(inBounds(fr,af)&&board[sqOf(fr,af)]==B_P){frontAtk=true;break;}}
-      if(!supported && frontAtk) score -= 15;
-    } else {
-      bool supported = false;
+      bool passed = true;
+      for(int rr=r+1; rr<8 && passed; rr++)
+        for(int ff=f-1; ff<=f+1; ff++)
+          if(ff>=0&&ff<8&&board[sqOf(rr,ff)]==B_P) passed=false;
+      if(passed) score += passedScale*(20 + r*12);
+      bool supported=false;
       for(int df=-1;df<=1;df+=2){int af=f+df;if(af<0||af>7)continue;
-        for(int rr=7;rr>=r;rr--) if(board[sqOf(rr,af)]==B_P){supported=true;break;} if(supported) break;}
-      bool frontAtk = false; int fr = r-1;
-      for(int df=-1;df<=1;df+=2){int af=f+df;if(inBounds(fr,af)&&board[sqOf(fr,af)]==W_P){frontAtk=true;break;}}
-      if(!supported && frontAtk) score += 15;
+        for(int rr=0;rr<=r;rr++) if(board[sqOf(rr,af)]==W_P){supported=true;break;} if(supported)break;}
+      if(!supported && r+1<8 && ((f>0&&board[sqOf(r+1,f-1)]==B_P)||(f<7&&board[sqOf(r+1,f+1)]==B_P)))
+        score -= 18;
+    } else {
+      bool passed = true;
+      for(int rr=r-1; rr>=0 && passed; rr--)
+        for(int ff=f-1; ff<=f+1; ff++)
+          if(ff>=0&&ff<8&&board[sqOf(rr,ff)]==W_P) passed=false;
+      if(passed) score -= passedScale*(20 + (7-r)*12);
+      bool supported=false;
+      for(int df=-1;df<=1;df+=2){int af=f+df;if(af<0||af>7)continue;
+        for(int rr=7;rr>=r;rr--) if(board[sqOf(rr,af)]==B_P){supported=true;break;} if(supported)break;}
+      if(!supported && r-1>=0 && ((f>0&&board[sqOf(r-1,f-1)]==W_P)||(f<7&&board[sqOf(r-1,f+1)]==W_P)))
+        score += 18;
     }
   }
 
-  // ── King safety ───────────────────────────────────────────────────────────
+  // ── King safety (opening + middlegame) ────────────────────────────────────
   if(!endgame) {
     if(wKsq >= 0) {
-      int kf = fileOf(wKsq);
-      for(int df = -1; df <= 1; df++) { int f2 = kf+df; if(f2<0||f2>7) continue;
-        bool sh = false;
-        for(int r = rankOf(wKsq)+1; r < 8; r++) if(board[sqOf(r,f2)]==W_P){sh=true;break;}
-        if(!sh) score -= 10; }
+      int kf = fileOf(wKsq), kr = rankOf(wKsq);
+      for(int df=-1;df<=1;df++) {
+        int f2=kf+df; if(f2<0||f2>7) continue;
+        bool shield=false;
+        for(int r=kr+1;r<8;r++) if(board[sqOf(r,f2)]==W_P){shield=true;break;}
+        if(!shield) score -= 40;
+      }
+      if(!wFile[kf]) score -= 30;
+      if(!wCastle_K && !wCastle_Q) score += 20;
+      int attackCount = 0;
+      for(int df=-1;df<=1;df++) for(int dr=-1;dr<=1;dr++) {
+        if(df==0&&dr==0) continue;
+        int as=sqOf(kr+dr,kf+df);
+        if(!squareOnBoard(as)) continue;
+        if(isSquareAttacked(as,false)) attackCount++;
+      }
+      score -= attackCount * 14;
     }
     if(bKsq >= 0) {
-      int kf = fileOf(bKsq);
-      for(int df = -1; df <= 1; df++) { int f2 = kf+df; if(f2<0||f2>7) continue;
-        bool sh = false;
-        for(int r = rankOf(bKsq)-1; r >= 0; r--) if(board[sqOf(r,f2)]==B_P){sh=true;break;}
-        if(!sh) score += 10; }
+      int kf = fileOf(bKsq), kr = rankOf(bKsq);
+      for(int df=-1;df<=1;df++) {
+        int f2=kf+df; if(f2<0||f2>7) continue;
+        bool shield=false;
+        for(int r=kr-1;r>=0;r--) if(board[sqOf(r,f2)]==B_P){shield=true;break;}
+        if(!shield) score += 40;
+      }
+      if(!bFile[kf]) score += 30;
+      if(!bCastle_K && !bCastle_Q) score -= 20;
+      int attackCount = 0;
+      for(int df=-1;df<=1;df++) for(int dr=-1;dr<=1;dr++) {
+        if(df==0&&dr==0) continue;
+        int as=sqOf(kr+dr,kf+df);
+        if(!squareOnBoard(as)) continue;
+        if(isSquareAttacked(as,true)) attackCount++;
+      }
+      score += attackCount * 14;
     }
   }
 
   // ── King activity in endgame ──────────────────────────────────────────────
   if(endgame) {
-    if(wKsq >= 0) { int kr=rankOf(wKsq), kf=fileOf(wKsq);
-      score += (8 - (abs(kr-3)+abs(kr-4)+abs(kf-3)+abs(kf-4))) * 4; }
-    if(bKsq >= 0) { int kr=rankOf(bKsq), kf=fileOf(bKsq);
-      score -= (8 - (abs(kr-3)+abs(kr-4)+abs(kf-3)+abs(kf-4))) * 4; }
+    if(wKsq>=0){int kr=rankOf(wKsq),kf=fileOf(wKsq);
+      score+=(8-(abs(kr-3)+abs(kr-4)+abs(kf-3)+abs(kf-4)))*5;}
+    if(bKsq>=0){int kr=rankOf(bKsq),kf=fileOf(bKsq);
+      score-=(8-(abs(kr-3)+abs(kr-4)+abs(kf-3)+abs(kf-4)))*5;}
+    if(wMat > bMat + 200 && bKsq >= 0) {
+      int bkf=fileOf(bKsq), bkr=rankOf(bKsq);
+      score += (7-min(bkf,7-bkf)) * 10 + (7-min(bkr,7-bkr)) * 10;
+    }
   }
 
-  // ── Opening-specific penalties ────────────────────────────────────────────
+  // ── Queen safety — UNIVERSAL, all phases ─────────────────────────────────
+  // Penalise queen on any square attacked by an enemy piece (SEE-based)
+  for(int s=0;s<64;s++) {
+    int p=board[s]; if(TYPE(p)!=QUEEN) continue;
+    bool isW = IS_WHITE(p);
+    int sign = isW ? -1 : 1;
+    // Attacked by enemy pawn directly?
+    int pdir = isW ? 1 : -1; // direction enemy pawns advance to attack this queen
+    int ePawn = isW ? B_P : W_P;
+    for(int df=-1;df<=1;df+=2) {
+      int pr=rankOf(s)+pdir, pf=fileOf(s)+df;
+      if(inBounds(pr,pf) && board[sqOf(pr,pf)]==ePawn) { score+=sign*55; break; }
+    }
+    // Attacked by any enemy piece — use SEE to determine real danger
+    int loss = seeCaptures(s, isW ? 2 : 1);
+    if(loss > 0) score += sign * min(loss, 120); // cap at 120 to avoid dominating eval
+  }
+
+  // ── UNIVERSAL piece safety — minor pieces on attacked squares ────────────
+  // Applies in ALL phases. Penalises knights and bishops sitting on squares
+  // where the opponent has a favourable capture (SEE > 0).
+  for(int s=0;s<64;s++) {
+    int p=board[s]; if(!p) continue;
+    int t=TYPE(p); if(t!=KNIGHT && t!=BISHOP) continue;
+    bool isW = IS_WHITE(p);
+    int attColor = isW ? 2 : 1;
+    int loss = seeCaptures(s, attColor);
+    if(loss > 0) {
+      int sign = isW ? -1 : 1;
+      score += sign * (loss / 2); // half penalty — already in PST, avoid double-count
+    }
+  }
+
+  // ── Development (opening only, now symmetrical both sides) ───────────────
   if(opening) {
-    // Undeveloped minor piece penalty
-    if(board[sqOf(7,1)]==B_N) score += 30; if(board[sqOf(7,6)]==B_N) score += 30;
-    if(board[sqOf(7,2)]==B_B) score += 25; if(board[sqOf(7,5)]==B_B) score += 25;
-    if(board[sqOf(0,1)]==W_N) score -= 30; if(board[sqOf(0,6)]==W_N) score -= 30;
-    if(board[sqOf(0,2)]==W_B) score -= 25; if(board[sqOf(0,5)]==W_B) score -= 25;
+    if(board[sqOf(0,1)]==W_N) score -= 28; if(board[sqOf(0,6)]==W_N) score -= 28;
+    if(board[sqOf(0,2)]==W_B) score -= 22; if(board[sqOf(0,5)]==W_B) score -= 22;
+    if(board[sqOf(7,1)]==B_N) score += 28; if(board[sqOf(7,6)]==B_N) score += 28;
+    if(board[sqOf(7,2)]==B_B) score += 22; if(board[sqOf(7,5)]==B_B) score += 22;
 
-    // Castling rights
-    if(!(bCastle_K||bCastle_Q)) score += 30;
-    if(!(wCastle_K||wCastle_Q)) score -= 30;
-    if(bCastle_K||bCastle_Q)    score -= 10;
-    if(wCastle_K||wCastle_Q)    score += 10;
+    if( wCastle_K|| wCastle_Q) score += 12;
+    if(!wCastle_K&&!wCastle_Q) score -= 28;
+    if( bCastle_K|| bCastle_Q) score -= 12;
+    if(!bCastle_K&&!bCastle_Q) score += 28;
 
-    // Premature queen development
-    { int wMH=0,bMH=0;
-      if(board[sqOf(0,1)]==W_N)wMH++;if(board[sqOf(0,6)]==W_N)wMH++;
-      if(board[sqOf(0,2)]==W_B)wMH++;if(board[sqOf(0,5)]==W_B)wMH++;
-      if(board[sqOf(7,1)]==B_N)bMH++;if(board[sqOf(7,6)]==B_N)bMH++;
-      if(board[sqOf(7,2)]==B_B)bMH++;if(board[sqOf(7,5)]==B_B)bMH++;
-      if(board[sqOf(0,3)]!=W_Q && wMH>=2) score -= 40;
-      if(board[sqOf(7,3)]!=B_Q && bMH>=2) score += 40;
+    { int wUndv=0, bUndv=0;
+      if(board[sqOf(0,1)]==W_N)wUndv++;if(board[sqOf(0,6)]==W_N)wUndv++;
+      if(board[sqOf(0,2)]==W_B)wUndv++;if(board[sqOf(0,5)]==W_B)wUndv++;
+      if(board[sqOf(7,1)]==B_N)bUndv++;if(board[sqOf(7,6)]==B_N)bUndv++;
+      if(board[sqOf(7,2)]==B_B)bUndv++;if(board[sqOf(7,5)]==B_B)bUndv++;
+      if(board[sqOf(0,3)]!=W_Q && wUndv>=2) score -= 45;
+      if(board[sqOf(7,3)]!=B_Q && bUndv>=2) score += 45;
     }
 
-    // Rim knight penalty
-    for(int s=0;s<64;s++) {
-      if(board[s]==B_N && (fileOf(s)==0||fileOf(s)==7)) score += 25;
-      if(board[s]==W_N && (fileOf(s)==0||fileOf(s)==7)) score -= 25;
+    for(int s=0;s<64;s++){
+      if(board[s]==W_N&&(fileOf(s)==0||fileOf(s)==7)) score-=28;
+      if(board[s]==B_N&&(fileOf(s)==0||fileOf(s)==7)) score+=28;
     }
   }
 
   // ── Rook on open/semi-open file ───────────────────────────────────────────
-  for(int s = 0; s < 64; s++) {
-    int p = board[s]; if(TYPE(p) != ROOK) continue;
-    int f = fileOf(s);
-    bool wp=false, bp=false;
-    for(int r=0;r<8;r++){if(board[sqOf(r,f)]==W_P)wp=true;if(board[sqOf(r,f)]==B_P)bp=true;}
-    if(IS_WHITE(p)) { if(!wp&&!bp) score+=20; else if(!wp) score+=10; }
-    else            { if(!bp&&!wp) score-=20; else if(!bp) score-=10; }
+  for(int s=0;s<64;s++){
+    int p=board[s]; if(TYPE(p)!=ROOK) continue;
+    int f=fileOf(s);
+    bool wp=wFile[f], bp=bFile[f];
+    if(IS_WHITE(p)) { if(!wp&&!bp) score+=22; else if(!wp) score+=11; }
+    else            { if(!bp&&!wp) score-=22; else if(!bp) score-=11; }
   }
 
-  // ── Bishop mobility penalty ───────────────────────────────────────────────
+  // ── Bishop mobility ───────────────────────────────────────────────────────
   { const int bd[4][2]={{1,1},{1,-1},{-1,1},{-1,-1}};
-    for(int s=0;s<64;s++) {
+    for(int s=0;s<64;s++){
       int p=board[s]; if(TYPE(p)!=BISHOP) continue;
-      int mob=0, r0=rankOf(s), f0=fileOf(s);
+      int mob=0,r0=rankOf(s),f0=fileOf(s);
       for(auto& d:bd){int r=r0+d[0],f=f0+d[1];
         while(inBounds(r,f)){mob++;if(board[sqOf(r,f)])break;r+=d[0];f+=d[1];}}
-      int pen = (mob==0)?50:(mob==1)?35:(mob==2)?20:(mob==3)?8:0;
-      if(IS_WHITE(p)) score -= pen; else score += pen;
+      int pen=(mob==0)?55:(mob==1)?38:(mob==2)?22:(mob==3)?8:0;
+      if(IS_WHITE(p)) score-=pen; else score+=pen;
     }
   }
 
-  // ── Pawn threat on knights/bishops — via shared pieceThreatPenalty ────────
-  for(int s = 0; s < 64; s++) {
-    int p = board[s]; if(!p) continue;
-    if(TYPE(p) != KNIGHT && TYPE(p) != BISHOP) continue;
-    score += pieceThreatPenalty(s, p);
+  // ── Pawn threat on knights/bishops (outpost-aware, full SEE) ─────────────
+  // Only called once per piece per eval — isOutpostSquare uses SEE internally
+  for(int s=0;s<64;s++){
+    int p=board[s]; if(!p) continue;
+    if(TYPE(p)!=KNIGHT&&TYPE(p)!=BISHOP) continue;
+    score += pieceThreatPenalty(s,p);
   }
 
   return score;
 }
 
+// ─── Killer moves ─────────────────────────────────────────────────────────────
+#define MAX_DEPTH 10
+Move killers[MAX_DEPTH][2];
+
+// ─── Per-depth move buffers ───────────────────────────────────────────────────
+#define AB_MAX_LEVELS 8
+#define Q_MAX_LEVELS  8
+Move abMoveBuf[AB_MAX_LEVELS][128];
+Move qMoveBuf [Q_MAX_LEVELS ][64];
+Move rootMoveBuf[128];
+int  abDepthLevel = 0;
+int  qDepthLevel  = 0;
+
+// ─── History heuristic ────────────────────────────────────────────────────────
+int16_t histHeuristic[64][64];
+
 // ─── Draw score ───────────────────────────────────────────────────────────────
+// Engine plays BLACK so positive diff = white ahead = bad for us.
+// We strongly avoid draws when we are ahead, and strongly accept when behind.
 int getDrawScore() {
   int wMat=0, bMat=0;
   for(int s=0;s<64;s++) {
     int p=board[s]; if(!p) continue; int t=TYPE(p); if(t==KING) continue;
     if(IS_WHITE(p)) wMat+=PIECE_VAL[t]; else bMat+=PIECE_VAL[t];
   }
-  int diff = wMat - bMat; bool endg = (wMat+bMat) < 1800;
-  if(diff > 400 && endg) return min(300, diff/3);
-  if(diff > 400)  return 50;
-  if(diff > 100)  return -80;
-  if(diff < -100) return -150;
-  return -30;
+  int diff = bMat - wMat; // positive = we (black) are ahead in material
+  bool endg = (wMat+bMat) < 1800;
+  // Black ahead: reject draw strongly
+  if(diff > 300 && endg) return min(250, diff/3); // cashing in endgame advantage
+  if(diff > 300)  return  60; // middlegame edge — still prefer play
+  if(diff > 100)  return  20; // slight edge — marginal draw preference
+  // Equal: slight draw aversion to encourage fighting play
+  if(diff > -100) return -40;
+  // White ahead: accept draw (we're behind)
+  if(diff > -300) return -100;
+  return -200; // well behind — take the draw
 }
 
 // ─── Move ordering ────────────────────────────────────────────────────────────
-// Unified, no early returns, no phase gates.
-// Safety checks fire for ALL pieces, ALL phases, BOTH colors.
+// Fully symmetrical for both colours. All heuristics apply to both sides.
 int moveScore(Move& m) {
   int s = 0;
-  uint8_t cap   = board[m.to];
-  int piece     = board[m.from];
-  int toR       = rankOf(m.to),   toF = fileOf(m.to);
-  int frR       = rankOf(m.from), frF = fileOf(m.from);
-  bool opening  = isOpeningPhase();
-  bool isBlack  = IS_BLACK(piece);
+  uint8_t cap  = board[m.to];
+  int piece    = board[m.from];
+  int toR      = rankOf(m.to),   toF = fileOf(m.to);
+  int frR      = rankOf(m.from), frF = fileOf(m.from);
+  bool opening = isOpeningPhase();
+  bool isBlack = IS_BLACK(piece);
+  int  myColor = isBlack ? 2 : 1;
+  int  oppColor= isBlack ? 1 : 2;
+  // "Home rank" and "promo rank" from this side's perspective
+  int  homeRank  = isBlack ? 7 : 0;
+  int  promoRank = isBlack ? 0 : 7;
 
-  // ── 1. Captures — MVV-LVA + SEE ordering ─────────────────────────────────
-  // Priority tiers (high to low):
-  //   Winning captures  (SEE > 0):  7000 + SEE gain + LVA bonus
-  //   Even captures     (SEE == 0): 5000            + LVA bonus
-  //   Losing captures   (SEE < 0):  1000 + SEE gain (negative, below quiet moves)
-  //
-  // Within winning and even captures, LVA (Least Valuable Attacker) ensures
-  // the cheapest piece captures first — e.g. pawn takes knight ranks above
-  // queen takes knight even when both win the same material. This is correct
-  // chess: use your least valuable piece to make a winning trade, preserve
-  // your more valuable pieces.
-  //
-  // LVA bonus: PIECE_VAL[KING] - PIECE_VAL[attacker_type]
-  //   Pawn   attacker: 20000 - 100  = 19900  (highest — go first)
-  //   Knight attacker: 20000 - 320  = 19680
-  //   Bishop attacker: 20000 - 330  = 19670
-  //   Rook   attacker: 20000 - 500  = 19500
-  //   Queen  attacker: 20000 - 900  = 19100  (lowest  — go last)
-  //   King   attacker: 20000 - 20000 = 0
+  // ── 1. Captures — MVV-LVA + SEE ──────────────────────────────────────────
   if(cap) {
-    int seeNet  = seeMoveGain(m.from, m.to, piece, isBlack ? 2 : 1);
-    int lva     = PIECE_VAL[KING] - PIECE_VAL[TYPE(piece)];  // higher = cheaper attacker
-    if(seeNet > 0) {
-      s += 7000 + seeNet + lva;   // winning: SEE gain + LVA
-    } else if(seeNet == 0) {
-      s += 5000 + lva;            // even: just LVA to prefer cheaper attacker
-    } else {
-      s += 1000 + seeNet;         // losing: no LVA bonus, ranked by how much we lose
-    }
+    int seeNet = seeMoveGain(m.from, m.to, piece, myColor);
+    int lva    = PIECE_VAL[KING] - PIECE_VAL[TYPE(piece)];
+    if(seeNet > 0)      s += 7000 + seeNet + lva;
+    else if(seeNet==0)  s += 5000 + lva;
+    else                s += 1000 + seeNet;
   }
-  if(m.promo)  s += 3000 + PIECE_VAL[m.promo];
-  if(m.flags==1) s += 2000;
+  if(m.promo)   s += 3000 + PIECE_VAL[m.promo];
+  if(m.flags==1) s += 2000;  // en passant
 
-  // ── 2. Universal quiet-move safety (all pieces, all phases) ──────────────
-  // Simulate the piece landing and run SEE from opponent's view.
-  // This is the ONLY place this check lives — no duplication.
-  if(cap == EMPTY && TYPE(piece) != PAWN && TYPE(piece) != KING) {
-    uint8_t sTo = board[m.to], sFrom = board[m.from];
-    board[m.to] = piece; board[m.from] = EMPTY;
-    int attColor = isBlack ? 1 : 2;
-    int netLoss  = seeCaptures(m.to, attColor);
-    board[m.to] = sTo; board[m.from] = sFrom;
+  // ── 2. Universal quiet-move safety ───────────────────────────────────────
+  if(cap==EMPTY && TYPE(piece)!=PAWN && TYPE(piece)!=KING) {
+    uint8_t sTo=board[m.to], sFrom=board[m.from];
+    board[m.to]=piece; board[m.from]=EMPTY;
+    int netLoss = seeCaptures(m.to, oppColor);
+    board[m.to]=sTo; board[m.from]=sFrom;
     if(netLoss > 0) s -= netLoss * 4;
   }
 
-  // ── 3. Pawn threat on landing square — fast check, no SEE ───────────────
-  // Use fastPawnThreat (no SEE simulation) for move ordering hot path.
-  // Full SEE-backed version only runs in evaluate().
-  if(cap == EMPTY && (TYPE(piece)==KNIGHT || TYPE(piece)==BISHOP)) {
-    uint8_t sTo = board[m.to], sFrom = board[m.from];
-    board[m.to] = piece; board[m.from] = EMPTY;
-    int pen = fastPawnThreat(m.to, COLOR(piece));
-    board[m.to] = sTo; board[m.from] = sFrom;
-    if(pen > 0) s -= pen;  // bad landing for any piece — lower its move score
+  // ── 3. Pawn threat on landing square ─────────────────────────────────────
+  if(cap==EMPTY && (TYPE(piece)==KNIGHT||TYPE(piece)==BISHOP)) {
+    uint8_t sTo=board[m.to], sFrom=board[m.from];
+    board[m.to]=piece; board[m.from]=EMPTY;
+    int pen = fastPawnThreat(m.to, myColor);
+    board[m.to]=sTo; board[m.from]=sFrom;
+    if(pen > 0) s -= pen;
   }
 
-  // ── 4. Black opening heuristics (only in opening, only for black) ─────────
-  if(!isBlack || !opening) return s;
+  // ── 4. History heuristic ──────────────────────────────────────────────────
+  s += histHeuristic[m.from][m.to] / 8;
 
-  int undevMinors = 0;
-  if(board[sqOf(7,1)]==B_N) undevMinors++;
-  if(board[sqOf(7,6)]==B_N) undevMinors++;
-  if(board[sqOf(7,2)]==B_B) undevMinors++;
-  if(board[sqOf(7,5)]==B_B) undevMinors++;
+  // ── 5. Opening heuristics — NOW SYMMETRICAL FOR BOTH COLOURS ─────────────
+  if(opening) {
+    int undevMinors = 0;
+    int nb1 = isBlack ? sqOf(7,1) : sqOf(0,1);
+    int ng8 = isBlack ? sqOf(7,6) : sqOf(0,6);
+    int bc8 = isBlack ? sqOf(7,2) : sqOf(0,2);
+    int bf8 = isBlack ? sqOf(7,5) : sqOf(0,5);
+    int myN = isBlack ? B_N : W_N;
+    int myB = isBlack ? B_B : W_B;
+    if(board[nb1]==myN) undevMinors++;
+    if(board[ng8]==myN) undevMinors++;
+    if(board[bc8]==myB) undevMinors++;
+    if(board[bf8]==myB) undevMinors++;
 
-  // Pawn moves: reward safe central advancement
-  if(TYPE(piece)==PAWN) {
-    int pawnSEE = seeMoveGain(m.from, m.to, piece, 2);
-    if(pawnSEE >= 0) {
-      if((frF==3||frF==4) && frR==6 && toR==4) s += 400;
-      else if((frF==3||frF==4) && toR==5)      s += 250;
-      else if((frF==3||frF==4) && toR==4)      s += 200;
-      else if((frF==2||frF==5) && (toR==4||toR==5)) s += 120;
-      else if(toR<=4 && toF>=2 && toF<=5)      s += 50;
-    } else {
-      s -= pawnSEE * 4;
+    // Pawn: reward safe central advancement
+    if(TYPE(piece)==PAWN) {
+      int pawnSEE = seeMoveGain(m.from, m.to, piece, myColor);
+      int advDir  = isBlack ? -1 : 1;  // direction toward opponent
+      int adjToR  = isBlack ? (7-toR) : toR; // normalised rank (0=home, 7=promo)
+      int adjFrR  = isBlack ? (7-frR) : frR;
+      if(pawnSEE >= 0) {
+        if((frF==3||frF==4) && adjFrR==1 && adjToR==3) s += 420;  // double push d/e
+        else if((frF==3||frF==4) && adjToR==2)          s += 260;  // single push d/e
+        else if((frF==3||frF==4) && adjToR==3)          s += 210;
+        else if((frF==2||frF==5) && (adjToR==3||adjToR==2)) s += 130;
+        else if(adjToR<=3 && toF>=2 && toF<=5)          s +=  55;
+      } else {
+        s -= (-pawnSEE) * 4;
+      }
+      if(frF==0||frF==7) s -= 200;
+      // Doubled pawn penalty
+      for(int r2=0;r2<8;r2++) {
+        int ps=board[sqOf(r2,toF)]; if(ps && COLOR(ps)==myColor && TYPE(ps)==PAWN){s-=75;break;}
+      }
     }
-    if(frF==0||frF==7) s -= 200;
-    for(int r2=0;r2<8;r2++) if(board[sqOf(r2,toF)]==B_P){s-=70;break;}
-    if(frF>=5 && toR<6) s -= 80;
-    if(cap && TYPE(cap)==PAWN && pawnSEE>=0) s += 180;
-  }
 
-  // Queen: heavy penalties for premature development
-  if(TYPE(piece)==QUEEN) {
-    if(undevMinors>=3) s -= 1500;
-    else if(undevMinors==2) s -= 1200;
-    else if(undevMinors==1) s -= 600;
-    if(toR>=3&&toR<=5&&toF>=2&&toF<=5) s -= 400;
-    if(bCastle_K||bCastle_Q) s -= 300;
-    if(cap!=EMPTY && undevMinors>=1) s -= 500;
-  }
-
-  // King: strong penalty for moving without castling
-  if(TYPE(piece)==KING && m.flags==0) s -= 1500;
-
-  // Development bonus: first move of a home-rank piece
-  if(frR==7 && (TYPE(piece)==KNIGHT||TYPE(piece)==BISHOP)) s += 400;
-
-  // Re-move penalties
-  if(m.from == lastBlackTo && cap == EMPTY) s -= 800;
-  if((bPieceMoved & (1ULL << m.from)) && cap == EMPTY)
-    s -= 400 + undevMinors * 120;
-
-  // Knight positional bonuses/penalties
-  if(TYPE(piece)==KNIGHT) {
-    if(toF==2||toF==5) s += 100;
-    if(toF==3||toF==4) s += 80;
-    if(toF==0||toF==7) s -= 150;
-    if(board[sqOf(7,1)]==B_N && board[sqOf(7,6)]==B_N) s += 80;
-    // Fork opportunity: landing near white pawn that can be attacked
-    const int katt[8][2]={{1,2},{1,-2},{-1,2},{-1,-2},{2,1},{2,-1},{-2,1},{-2,-1}};
-    for(auto& d:katt) {
-      int pr=toR+d[0], pf=toF+d[1];
-      if(inBounds(pr,pf)){int psq=sqOf(pr,pf);
-        if(board[psq]==B_P && seeCaptures(psq,1)>0){s+=400;break;}}
+    // Queen: penalise premature development — both colours
+    if(TYPE(piece)==QUEEN) {
+      if(undevMinors>=3) s -= 1600;
+      else if(undevMinors==2) s -= 1200;
+      else if(undevMinors==1) s -= 650;
+      // Queen retreating to home square — passive
+      if(toR==homeRank) s -= 700;
+      // Queen moving to flank in opening — include b/g files too
+      if((toF==0||toF==1||toF==2||toF==5||toF==6||toF==7)) s -= 320;
+      // Castling rights still available — don't expose queen yet
+      if(isBlack?(bCastle_K||bCastle_Q):(wCastle_K||wCastle_Q)) s -= 320;
     }
-  }
 
-  // Bishop positional bonuses/penalties
-  if(TYPE(piece)==BISHOP) {
-    if((toR==6&&toF==1)||(toR==6&&toF==6)) s += 80;
-    if(toF==0||toF==7) s -= 120;
-    if(board[sqOf(7,1)]==B_N||board[sqOf(7,6)]==B_N) s -= 100;
-    if((toF==3||toF==4)&&toR==5&&board[sqOf(6,toF)]==B_P) s -= 100;
-  }
+    // King: strong penalty for moving without castling
+    if(TYPE(piece)==KING && m.flags==0) s -= 1800;
 
-  // General centrality bonus for knights and bishops
-  if(TYPE(piece)==KNIGHT||TYPE(piece)==BISHOP) {
-    int cd = abs(toF-3)+abs(toF-4)+abs(toR-3)+abs(toR-4);
-    s += (8 - cd) * 12;
-    if(m.to == lastBlackFrom && cap == EMPTY) s -= 220;
-  }
+    // Development bonus: first move of a home-rank minor
+    if(frR==homeRank && (TYPE(piece)==KNIGHT||TYPE(piece)==BISHOP)) s += 420;
 
-  // Backward move penalty — skip in opening to allow retreat after kicks
-  if(!opening && toR > frR && cap == EMPTY) s -= 100;
+    // Re-move penalty: moving a piece that already moved this opening
+    if((bPieceMoved & (1ULL << m.from)) && cap==EMPTY)
+      s -= 420 + undevMinors * 130;
+    // Specific re-move: square we just moved FROM
+    if(m.from == lastBlackTo && cap==EMPTY) s -= 820;
 
-  // Castling: reward if safe
-  if(m.flags==2||m.flags==3) {
-    int maxHang = 0;
-    for(int sq=0;sq<64;sq++) {
-      if(!board[sq]||!IS_BLACK(board[sq])||TYPE(board[sq])==KING) continue;
-      int loss=seeCaptures(sq,1); if(loss>maxHang) maxHang=loss;
+    // Knight positional
+    if(TYPE(piece)==KNIGHT) {
+      // Rim penalty — both sides
+      if(toF==0||toF==7) s -= 160;
+      // Central files good
+      if(toF==2||toF==5) s += 110;
+      if(toF==3||toF==4) s +=  90;
+      // Penalty for far-advanced knight without support (g4/h4 type)
+      int adjToR = isBlack ? (7-toR) : toR;
+      if(adjToR >= 4) {
+        // Advanced into enemy territory — is it safe?
+        uint8_t sTo=board[m.to], sFrom=board[m.from];
+        board[m.to]=piece; board[m.from]=EMPTY;
+        int threat = fastPawnThreat(m.to, myColor);
+        board[m.to]=sTo; board[m.from]=sFrom;
+        if(threat > 0) s -= 250;  // extra penalty on top of the earlier fastPawnThreat
+      }
+      // Both own knights undeveloped — prefer developing
+      if(board[nb1]==myN && board[ng8]==myN) s += 90;
     }
-    s += (maxHang==0) ? 600 : (maxHang<=100) ? 200 : -800;
-  }
 
-  // Rook: only in opening when developed enough
-  if(TYPE(piece)==ROOK) {
-    if(m.to==lastBlackFrom && cap==EMPTY) s -= 350;
-    if(undevMinors>=2) s -= 500;
-    if(undevMinors==1) s -= 200;
-    bool openFile=true;
-    for(int r=0;r<8;r++) if(board[sqOf(r,toF)]==B_P){openFile=false;break;}
-    if(openFile) s += 80;
-    if(toR==1)   s += 120;
+    // Bishop positional
+    if(TYPE(piece)==BISHOP) {
+      if(toF==0||toF==7) s -= 130;
+      // Fianchetto squares
+      int adjFiR = isBlack ? 6 : 1;
+      if(toR==adjFiR && (toF==1||toF==6)) s += 90;
+      // Don't develop bishop before both knights in early game
+      if(undevMinors>=3 && (board[nb1]==myN||board[ng8]==myN)) s -= 80;
+    }
+
+    // General centrality bonus for minor pieces — gated on SEE safety
+    if(TYPE(piece)==KNIGHT||TYPE(piece)==BISHOP) {
+      int adjToR = isBlack ? (7-toR) : toR;
+      // Only reward centrality up to rank 4 (not deep advances)
+      if(adjToR <= 4) {
+        // Check SEE: only give centrality bonus if the square is safe
+        uint8_t sTo2=board[m.to], sFrom2=board[m.from];
+        board[m.to]=piece; board[m.from]=EMPTY;
+        int squareLoss = seeCaptures(m.to, oppColor);
+        board[m.to]=sTo2; board[m.from]=sFrom2;
+        if(squareLoss == 0) {
+          int cd = abs(toF-3)+abs(toF-4)+abs(adjToR-2)+abs(adjToR-3);
+          s += (8-cd)*10;
+        } else {
+          // Square is losing — subtract centrality instead of adding it
+          s -= squareLoss * 2;
+        }
+      }
+      // Swapping back to the square we came from
+      if(m.to==lastBlackFrom && cap==EMPTY) s -= 230;
+    }
+
+    // Castling: reward safe castle
+    if(m.flags==2||m.flags==3) {
+      int maxHang=0;
+      for(int sq=0;sq<64;sq++){
+        int p=board[sq]; if(!p||COLOR(p)!=myColor||TYPE(p)==KING) continue;
+        int loss=seeCaptures(sq,oppColor); if(loss>maxHang) maxHang=loss;
+      }
+      s += (maxHang==0) ? 650 : (maxHang<=100) ? 220 : -850;
+    }
+
+    // Rook development: only after minors
+    if(TYPE(piece)==ROOK) {
+      if(undevMinors>=2) s -= 550;
+      if(undevMinors==1) s -= 220;
+      bool openFile=true;
+      int myPawn = isBlack ? B_P : W_P;
+      for(int r=0;r<8;r++) if(board[sqOf(r,toF)]==myPawn){openFile=false;break;}
+      if(openFile) s += 90;
+      int sevenR = isBlack ? 1 : 6;
+      if(toR==sevenR) s += 130;
+    }
+  } // end opening block
+
+  // ── 6. Universal queen safety — applies in ALL phases ────────────────────
+  if(TYPE(piece)==QUEEN && cap==EMPTY) {
+    // Passive retreat to home rank
+    if(toR==homeRank) s -= 700;
+    // Queen moving to a flank file (a,b,g,h) — risky in all phases
+    if(toF==0||toF==1||toF==6||toF==7) s -= 200;
+    // Queen landing on an attacked square — SEE penalty
+    uint8_t sTo=board[m.to], sFrom=board[m.from];
+    board[m.to]=piece; board[m.from]=EMPTY;
+    int qloss = seeCaptures(m.to, oppColor);
+    board[m.to]=sTo; board[m.from]=sFrom;
+    if(qloss > 0) s -= qloss * 3;
   }
 
   return s;
@@ -1937,22 +2012,6 @@ void sortMoves(Move* moves, int count) {
     scores[j+1] = keyS;
   }
 }
-
-// ─── Killer moves ─────────────────────────────────────────────────────────────
-#define MAX_DEPTH 10
-Move killers[MAX_DEPTH][2];
-
-// ─── Per-depth move buffers ───────────────────────────────────────────────────
-#define AB_MAX_LEVELS 8
-#define Q_MAX_LEVELS  8
-Move abMoveBuf[AB_MAX_LEVELS][128];
-Move qMoveBuf [Q_MAX_LEVELS ][64];
-Move rootMoveBuf[128];
-int  abDepthLevel = 0;
-int  qDepthLevel  = 0;
-
-// ─── History heuristic ────────────────────────────────────────────────────────
-int16_t histHeuristic[64][64];
 
 // ─── Quiescence search ───────────────────────────────────────────────────────
 int quiesce(int alpha, int beta) {
@@ -2708,13 +2767,6 @@ void drawSelOutline() {
   }
 }
 
-void drawPhaseIndicator() {
-  int ph = gamePhase();
-  uint16_t col = (ph==0) ? C_HOVER : (ph==1) ? C_BTN_HL : 0xF800;
-  tft.fillRect(4, 119, 6, 6, col);
-  tft.drawRect(3, 118, 8, 8, C_BORDER);
-}
-
 // ─── UI-3: Draw red flag icon for reset button ────────────────────────────────
 // Draws a pixel-art flag: a vertical pole with a red triangular flag on top
 // x,y = top-left corner of the icon area (fits in 13x34 panel space)
@@ -2789,18 +2841,14 @@ void drawProgressBar(int pct) {
   int oldPct = dispPct;
   dispPct = pct;
 
+  // Border uses theme colour
+  tft.drawRect(PB_X, PB_Y, PB_IW+2, PB_IH+2, C_PB_BORDER);
+
   if(pct == 0 || oldPct < 0) {
+    // Full reset: fill empty, redraw border, reset label
     tft.fillRect(PB_X+1, PB_Y+1, PB_IW, PB_IH, C_PB_EMPTY);
-    for(int y=0; y<PB_IH+2; y++) {
-      int gi = (y * 95) / (PB_IH+1);
-      uint16_t bc = pgm_read_word(&pbGrad[gi]);
-      tft.drawPixel(PB_X,         PB_Y+y, bc);
-      tft.drawPixel(PB_X+PB_IW+1, PB_Y+y, bc);
-    }
-    tft.drawFastHLine(PB_X, PB_Y,         PB_IW+2, pgm_read_word(&pbGrad[0]));
-    tft.drawFastHLine(PB_X, PB_Y+PB_IH+1, PB_IW+2, pgm_read_word(&pbGrad[95]));
     tft.fillRect(PB_X-2, 112, 20, 9, C_BG);
-    tft.setTextColor(pgm_read_word(&pbGrad[0]));
+    tft.setTextColor(C_BORDER);
     tft.setTextSize(1);
     tft.setCursor(PB_X, 113);
     tft.print("00%");
@@ -2811,10 +2859,17 @@ void drawProgressBar(int pct) {
   int newH = (PB_IH * pct) / 100;
 
   if(newH > oldH) {
+    // Fill new rows from bottom up, interpolating between C_BTN_HL and C_HOVER
     for(int y = oldH; y < newH; y++) {
-      int gradIdx = (y * 95) / PB_IH;
-      if(gradIdx > 95) gradIdx = 95;
-      uint16_t c = pgm_read_word(&pbGrad[gradIdx]);
+      // Blend: at y=0 use C_BTN_HL (dim), at y=PB_IH use C_HOVER (bright)
+      // Simple 2-stop interpolation in RGB565
+      uint8_t t = (uint8_t)((y * 255) / PB_IH);
+      uint8_t r0=(C_BTN_HL>>11)&31, g0=(C_BTN_HL>>5)&63, b0=C_BTN_HL&31;
+      uint8_t r1=(C_HOVER>>11)&31,  g1=(C_HOVER>>5)&63,  b1=C_HOVER&31;
+      uint8_t r2=r0+(uint8_t)(((int)(r1-r0)*t)>>8);
+      uint8_t g2=g0+(uint8_t)(((int)(g1-g0)*t)>>8);
+      uint8_t b2=b0+(uint8_t)(((int)(b1-b0)*t)>>8);
+      uint16_t c = ((uint16_t)r2<<11)|((uint16_t)g2<<5)|b2;
       int yy = PB_Y + 1 + PB_IH - 1 - y;
       tft.drawFastHLine(PB_X+1, yy, PB_IW, c);
     }
@@ -2822,11 +2877,9 @@ void drawProgressBar(int pct) {
     tft.fillRect(PB_X+1, PB_Y+1, PB_IW, oldH - newH, C_PB_EMPTY);
   }
 
+  // Percentage label
   tft.fillRect(PB_X-2, 112, 20, 9, C_BG);
-  int gradIdx = (pct * 95) / 100;
-  if(gradIdx > 95) gradIdx = 95;
-  uint16_t tc = pgm_read_word(&pbGrad[gradIdx]);
-  tft.setTextColor(tc);
+  tft.setTextColor(C_HOVER);
   tft.setTextSize(1);
   tft.setCursor(PB_X, 113);
   if(pct < 10) tft.print('0');
@@ -2858,7 +2911,6 @@ void drawAll() {
     drawLegalDots();
   }
   if(cursorCol>=0) drawCursorAt(cursorCol, cursorRow);
-  drawPhaseIndicator();
   if(gameOver) drawGameOver();
 }
 
@@ -3287,26 +3339,26 @@ void showCheckmateScreen() {
   tft.drawFastHLine(cx-14, cy+10, 28, C_L_ACCENT2);
   tft.fillRect(cx-14, cy+11, 28, 2, C_L_BG);
 
-  // "YOU LOST" — large, alternating theme title colours
+  // "CHECKMATE" — large heading
   { tft.setTextSize(2);
-    const char* t1 = "YOU LOST"; int tlen = strlen(t1);
+    const char* t1 = "CHECKMATE"; int tlen = strlen(t1);
     int tx0 = (160 - tlen*12)/2;
     for(int i = 0; i < tlen; i++) {
       tft.setTextColor((i%2==0) ? C_L_TITLE : C_L_CROWN_HI);
-      tft.setCursor(tx0 + i*12, 48); tft.print(t1[i]);
+      tft.setCursor(tx0 + i*12, 46); tft.print(t1[i]);
     }
   }
 
   // Divider — left red, right theme accent
-  tft.drawFastHLine(20, 68, 60, 0x8000);
-  tft.drawFastHLine(80, 68, 60, C_L_ACCENT2);
+  tft.drawFastHLine(20, 70, 60, 0x8000);
+  tft.drawFastHLine(80, 70, 60, C_L_ACCENT2);
 
   tft.setTextColor(C_L_SUB); tft.setTextSize(1);
-  { const char* go = "CHECKMATE"; int gl=strlen(go);
-    tft.setCursor((160-gl*6)/2, 73); tft.print(go); }
+  { const char* go = "Black wins."; int gl=strlen(go);
+    tft.setCursor((160-gl*6)/2, 76); tft.print(go); }
   tft.setTextColor(C_L_TITLE);
-  { const char* bw = "Black wins."; int bwl=strlen(bw);
-    tft.setCursor((160-bwl*6)/2, 85); tft.print(bw); }
+  { const char* bw = "You lost."; int bwl=strlen(bw);
+    tft.setCursor((160-bwl*6)/2, 88); tft.print(bw); }
 
   // Bottom bar — left red, right theme
   tft.fillRect(0,  108, 80, 1, 0x8000);
@@ -3321,7 +3373,10 @@ void showCheckmateScreen() {
   tft.drawFastHLine(0,  127, 80, 0xD000);
   tft.drawFastHLine(80, 127, 80, C_L_ACCENT);
 
-  delay(1500);
+  // Wait for button press (not a timed delay)
+  while(digitalRead(JOY_SW) == LOW)  { yield(); delay(10); } // wait release if held
+  while(digitalRead(JOY_SW) != LOW)  { yield(); delay(20); } // wait press
+  while(digitalRead(JOY_SW) == LOW)  { yield(); delay(10); } // wait release
 }
 
 
@@ -3413,10 +3468,21 @@ void handleJoystick() {
       drawLeftPanel();
       drawCursorAt(cursorCol, cursorRow);
     } else if(dy != 0) {
-      // Cycle 1→2→3→1
-      if(panelFocus == 1)      panelFocus = 2;
-      else if(panelFocus == 2) panelFocus = 3;
-      else                     panelFocus = 1;
+      // Cycle through panel buttons — direction is inverted relative to board:
+      // pushing UP (dy=+1 on board) goes DOWN in the panel list, and vice versa.
+      // Flip dy here so the user experience matches the board direction.
+      int panelDy = -dy;
+      if(panelDy > 0) {
+        // Move down the panel: 1→2→3→1
+        if(panelFocus == 1)      panelFocus = 2;
+        else if(panelFocus == 2) panelFocus = 3;
+        else                     panelFocus = 1;
+      } else {
+        // Move up the panel: 1→3→2→1
+        if(panelFocus == 1)      panelFocus = 3;
+        else if(panelFocus == 3) panelFocus = 2;
+        else                     panelFocus = 1;
+      }
       cursorRow = (panelFocus == 1) ? 6 : (panelFocus == 2) ? 3 : 1;
       drawLeftPanel();
     }
@@ -3580,7 +3646,6 @@ void handleButton() {
         drawCursorAt(cursorCol, cursorRow);
         moved = true;
 
-        drawPhaseIndicator();
         checkGameOver();
         if(gameOver) { drawGameOver(); return; }
 
@@ -3632,7 +3697,6 @@ void handleButton() {
           drawLastMoveOutlines(engineFrom, engineTo);
           drawCursorAt(cursorCol, cursorRow);
 
-          drawPhaseIndicator();
           checkGameOver();
           if(gameOver) drawGameOver();
         }
