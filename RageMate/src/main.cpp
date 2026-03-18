@@ -2020,7 +2020,6 @@ int quiesce(int alpha, int beta) {
   if((nodeCount & 255) == 0) {
     unsigned long _now = millis();
     if((_now - searchStart) > SEARCH_TIME_MS) { searchAborted=true; return 0; }
-    // Progress bar is purely time-based — updated here and in alphaBeta
     int _pct = (int)((_now - searchStart) * 95UL / SEARCH_TIME_MS);
     if(_pct > 95) _pct = 95;
     searchPct = _pct;
@@ -2488,7 +2487,15 @@ Move runSearchOnCore0() {
 }
 
 Move getBotMove() {
-  // ── Initialise search state ───────────────────────────────────────────────
+  if(openingMoveIndex < 2) {
+    Move bm = getBookMove(openingMoveIndex+1);
+    if(bm.from || bm.to) {
+      openingMoveIndex++;
+      return bm;
+    }
+    openingMoveIndex = 2;
+  }
+
   memset(killers, 0, sizeof(killers));
   memset(histHeuristic, 0, sizeof(histHeuristic));
   searchAborted = false;
@@ -2502,50 +2509,20 @@ Move getBotMove() {
   generateMoves(false, moves, count, false);
   sortMoves(moves, count);
 
-  // Seed completedBestMove with the first legal move as an absolute fallback
   Move completedBestMove = {0,0,0,0};
   int  completedBestScore = -99999;
-  for(int i = 0; i < count; i++) {
+
+  for(int i=0;i<count;i++) {
     if(isLegal(moves[i])) { completedBestMove = moves[i]; break; }
   }
 
-  // ── Opening book: use as the initial fallback, but ALWAYS search too ──────
-  // The book move is stored as completedBestMove so if the search is aborted
-  // at depth 1 we still have a sensible reply. The search will override it
-  // if it finds anything better within the time budget.
-  if(openingMoveIndex < 2) {
-    Move bm = getBookMove(openingMoveIndex + 1);
-    if(bm.from || bm.to) {
-      completedBestMove = bm;  // use as fallback; search may improve on it
-      openingMoveIndex++;
-      // Bring book move to front of root list for better search ordering
-      for(int i = 0; i < count; i++) {
-        if(moves[i].from == bm.from && moves[i].to == bm.to) {
-          Move tmp = moves[0]; moves[0] = moves[i]; moves[i] = tmp;
-          break;
-        }
-      }
-    } else {
-      openingMoveIndex = 2; // book exhausted
-    }
-  }
-
-  // ── Iterative deepening — always runs until time expires ──────────────────
-  // Max depth 20: in practice depth 8-10 exhausts 4 seconds on any real
-  // position, so this cap is never reached except in trivial endgames.
-  // The ONLY allowed early exit is a confirmed forced mate (score > 18000)
-  // because further search genuinely adds nothing in that case.
-  for(int depth = 1; depth <= 20; depth++) {
+  for(int depth = 1; depth <= 7; depth++) {
     if(searchAborted) break;
-
-    // Bail immediately if the *remaining* time is so short that even depth 1
-    // from this point would be pointless (< 5% of budget left)
-    if((millis() - searchStart) >= SEARCH_TIME_MS) break;
 
     Move  iterBestMove  = {0,0,0,0};
     int   iterBestScore = -99999;
 
-    // Aspiration windows
+    // Aspiration windows: narrow window around previous score for faster cutoffs
     int aspDelta = 50;
     int alpha, beta;
     if(depth >= 3 && completedBestScore > -90000) {
@@ -2555,24 +2532,25 @@ Move getBotMove() {
       alpha = -99999; beta = 99999;
     }
 
-    // Always search best-so-far move first
     if(completedBestMove.from || completedBestMove.to) {
-      for(int i = 0; i < count; i++) {
-        if(moves[i].from == completedBestMove.from &&
-           moves[i].to   == completedBestMove.to) {
-          Move tmp = moves[0]; moves[0] = moves[i]; moves[i] = tmp;
+      for(int i=0;i<count;i++) {
+        if(moves[i].from==completedBestMove.from && moves[i].to==completedBestMove.to) {
+          Move tmp=moves[0]; moves[0]=moves[i]; moves[i]=tmp;
           break;
         }
       }
     }
 
+    // Aspiration loop: widen window on fail-high/low
+    // windowLo/windowHi track the actual window bounds; alpha is updated
+    // inside the loop but we compare the final score against the window.
     int windowLo = alpha, windowHi = beta;
     while(true) {
       iterBestMove  = {0,0,0,0};
       iterBestScore = -99999;
-      int loopAlpha = windowLo;
+      int loopAlpha = windowLo;  // fresh alpha for this iteration
 
-      for(int i = 0; i < count; i++) {
+      for(int i=0; i<count; i++) {
         if(!isLegal(moves[i])) continue;
         if(searchAborted) break;
 
@@ -2594,40 +2572,36 @@ Move getBotMove() {
 
       if(searchAborted) break;
 
+      // Compare against the window bounds, not the updated loopAlpha
       if(iterBestScore <= windowLo && depth >= 3) {
+        // Fail low — widen lower bound
         windowLo = max(-99999, windowLo - aspDelta);
         aspDelta *= 2;
       } else if(iterBestScore >= windowHi && depth >= 3) {
+        // Fail high — widen upper bound
         windowHi = min(99999, windowHi + aspDelta);
         aspDelta *= 2;
       } else {
-        alpha = loopAlpha;
+        alpha = loopAlpha;  // accept result
         break;
       }
       if(aspDelta > 800) { windowLo = -99999; windowHi = 99999; }
     }
 
-    // Only update completedBestMove if this depth completed without abort
     if(!searchAborted && (iterBestMove.from || iterBestMove.to)) {
       completedBestMove  = iterBestMove;
       completedBestScore = iterBestScore;
-      // Bring best move to front for next iteration
-      for(int i = 0; i < count; i++) {
-        if(moves[i].from == completedBestMove.from &&
-           moves[i].to   == completedBestMove.to) {
-          Move tmp = moves[0]; moves[0] = moves[i]; moves[i] = tmp;
+      for(int i=0;i<count;i++) {
+        if(moves[i].from==completedBestMove.from && moves[i].to==completedBestMove.to) {
+          Move tmp=moves[0]; moves[0]=moves[i]; moves[i]=tmp;
           break;
         }
       }
     }
 
-    // Only allowed early exit: confirmed forced mate
-    // Further depth adds nothing when we know we're checkmating in N moves.
     if(completedBestScore > 18000) break;
   }
 
-  // Ensure progress bar shows 100% — the UI loop in runSearchOnCore0 will
-  // also call drawProgressBar(100), but setting 99 here covers the gap.
   searchPct = 99;
   return completedBestMove;
 }
