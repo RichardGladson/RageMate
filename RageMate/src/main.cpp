@@ -1,27 +1,13 @@
 /*
- * RageMate Valkyra Theta V1
- * Full engine overhaul over Beta V3 — all 14 changes ESP32-validated:
- *
- * SEARCH:
- *   1. Aspiration windows in iterative deepening root (±50cp, widens on fail)
- *   2. TT move guaranteed sort-priority via TT_SORT_BONUS
- *   3. LMR threshold raised: move index ≥5, depth ≥3 (was ≥3, ≥2)
- *   4. Null-move R fixed to 2 always (was R=3 at depth≥5, too aggressive)
- *   5. Futility pruning margin raised 150→200cp
- *   6. History heuristic aged (halved) at start of each search
- *   7. wKingSq / bKingSq globals cached in makeMove/unmakeMove
- *      → replaces 64-sq linear scan in isInCheck on every node
- *
- * EVALUATION:
- *   8.  Knight outpost positive bonus (+25 central, +15 other) via isOutpostSquare
- *   9.  Rook on 7th rank bonus (+22 middlegame, +35 endgame)
- *   10. Connected/protected passed pawn bonus (+15 per connection)
- *   11. Knight mobility approximation: penalty if ≤2 reachable squares
- *   12. Queen mobility approximation: penalty if hemmed (≤3 open ray directions)
- *   13. King safety: extra penalty for enemy rook/queen on open file into king zone
- *
- * OPENING BOOK:
- *   14. Extended to 3–4 moves per line (was 2)
+ * RageMate Valkyra Beta V3
+ * Engine revamp (V3.1):
+ *   - evaluate(): fully symmetrical for both colours, stronger king safety (40pts/file),
+ *     queen safety penalty, endgame king-push, unified pawn structure
+ *   - moveScore(): opening heuristics now apply to BOTH colours (was black-only),
+ *     queen retreat penalty (all phases), stronger castling reward,
+ *     far-advanced unstable knight penalty, history heuristic integrated
+ *   - Fixes: Ng4 instability, Qa5+ tempo loss, Nxd4 horizon, Qd8 retreat,
+ *     colour asymmetry causing worse play vs stronger opponents
  */
 
 #include <Arduino.h>
@@ -630,11 +616,6 @@ bool bCastle_K = true, bCastle_Q = true;
 int  enPassantSq = -1;
 bool whiteToMove = true;
 
-// ─── Cached king squares (updated in makeMove/unmakeMove) ───────────────────
-// Eliminates the 64-square linear scan in isInCheck on every node.
-int wKingSq = 4;   // e1 at game start
-int bKingSq = 60;  // e8 at game start
-
 // ─── Move structure ─────────────────────────────────────────────────────────
 struct Move {
   uint8_t from, to;
@@ -850,10 +831,6 @@ unsigned long searchStart;
 uint32_t nodeCount = 0;
 #define SEARCH_TIME_MS 4000
 
-// Guaranteed bonus applied to the TT move in moveScore() so it always sorts first.
-// Larger than any realistic heuristic score combination.
-#define TT_SORT_BONUS 50000
-
 // ─── Development tracking ─────────────────────────────────────────────────────
 uint64_t bPieceMoved = 0;
 int      lastBlackFrom = -1;
@@ -937,8 +914,6 @@ void initBoard() {
   wCastle_K=wCastle_Q=bCastle_K=bCastle_Q=true;
   enPassantSq=-1;
   whiteToMove=true;
-  wKingSq = 4;    // e1
-  bKingSq = 60;   // e8
   historyCount=0;
   hashHistoryCount=0;
   currentHash=computeHash();
@@ -1138,10 +1113,9 @@ bool isSquareAttacked(int sq, bool byWhite) {
 }
 
 bool isInCheck(bool white) {
-  // Use cached king squares — eliminates 64-square linear scan per node.
-  int ksq = white ? wKingSq : bKingSq;
-  if(ksq < 0) return false;
-  return isSquareAttacked(ksq, !white);
+  int kp = white ? W_K : B_K;
+  for(int s=0;s<64;s++) if(board[s]==kp) return isSquareAttacked(s,!white);
+  return false;
 }
 
 // Find king square (cached-friendly helper)
@@ -1181,12 +1155,6 @@ void IRAM_ATTR makeMove(Move& m, HistoryEntry* he) {
 
   board[m.to] = piece;
   board[m.from] = EMPTY;
-
-  // ── Update cached king squares ────────────────────────────────────────────
-  if(TYPE(piece)==KING) {
-    if(IS_WHITE(piece)) wKingSq = m.to;
-    else                bKingSq = m.to;
-  }
 
   if(m.promo && TYPE(piece)==PAWN) {
     int promoPiece = MAKE_PIECE(COLOR(piece), m.promo);
@@ -1237,12 +1205,6 @@ void IRAM_ATTR unmakeMove(HistoryEntry& he) {
 
   board[m.from] = piece;
   board[m.to] = he.captured;
-
-  // ── Restore cached king squares ───────────────────────────────────────────
-  if(TYPE(piece)==KING) {
-    if(IS_WHITE(piece)) wKingSq = m.from;
-    else                bKingSq = m.from;
-  }
 
   if(m.flags==1) {
     int capSq = sqOf(rankOf(m.from), fileOf(m.to));
@@ -1571,8 +1533,7 @@ int evaluate() {
   bool endgame = isEndgame();
   bool opening = isOpeningPhase();
 
-  int wKsq = wKingSq, bKsq = bKingSq;
-  int wb = 0, bb = 0;
+  int wKsq = -1, bKsq = -1, wb = 0, bb = 0;
   int wMat = 0, bMat = 0;
 
   // ── Material + PST ────────────────────────────────────────────────────────
@@ -1583,10 +1544,12 @@ int evaluate() {
     if(IS_WHITE(p)) {
       score += val;
       if(t == BISHOP) wb++;
+      if(t == KING)   wKsq = s;
       if(t != KING)   wMat += PIECE_VAL[t];
     } else {
       score -= val;
       if(t == BISHOP) bb++;
+      if(t == KING)   bKsq = s;
       if(t != KING)   bMat += PIECE_VAL[t];
     }
   }
@@ -1615,7 +1578,7 @@ int evaluate() {
     if(bFile[f] && !bAdj) score += 22;
   }
 
-  // Passed + backward pawns + connected/protected passed pawn bonus
+  // Passed + backward pawns
   int passedScale = endgame ? 2 : 1;
   for(int s = 0; s < 64; s++) {
     int p = board[s]; if(TYPE(p) != PAWN) continue;
@@ -1625,21 +1588,7 @@ int evaluate() {
       for(int rr=r+1; rr<8 && passed; rr++)
         for(int ff=f-1; ff<=f+1; ff++)
           if(ff>=0&&ff<8&&board[sqOf(rr,ff)]==B_P) passed=false;
-      if(passed) {
-        int ppBonus = passedScale*(20 + r*12);
-        // Connected passed pawn: another white pawn on adjacent file, same or adjacent rank
-        for(int df=-1;df<=1;df+=2) {
-          int af=f+df; if(af<0||af>7) continue;
-          if(board[sqOf(r,af)]==W_P || (r>0&&board[sqOf(r-1,af)]==W_P)
-             || (r<7&&board[sqOf(r+1,af)]==W_P)) { ppBonus+=15; break; }
-        }
-        // Protected passed pawn: own pawn supports it from behind on adjacent file
-        for(int df=-1;df<=1;df+=2) {
-          int af=f+df; if(af<0||af>7) continue;
-          if(r>0&&board[sqOf(r-1,af)]==W_P) { ppBonus+=15; break; }
-        }
-        score += ppBonus;
-      }
+      if(passed) score += passedScale*(20 + r*12);
       bool supported=false;
       for(int df=-1;df<=1;df+=2){int af=f+df;if(af<0||af>7)continue;
         for(int rr=0;rr<=r;rr++) if(board[sqOf(rr,af)]==W_P){supported=true;break;} if(supported)break;}
@@ -1650,19 +1599,7 @@ int evaluate() {
       for(int rr=r-1; rr>=0 && passed; rr--)
         for(int ff=f-1; ff<=f+1; ff++)
           if(ff>=0&&ff<8&&board[sqOf(rr,ff)]==W_P) passed=false;
-      if(passed) {
-        int ppBonus = passedScale*(20 + (7-r)*12);
-        for(int df=-1;df<=1;df+=2) {
-          int af=f+df; if(af<0||af>7) continue;
-          if(board[sqOf(r,af)]==B_P || (r<7&&board[sqOf(r+1,af)]==B_P)
-             || (r>0&&board[sqOf(r-1,af)]==B_P)) { ppBonus+=15; break; }
-        }
-        for(int df=-1;df<=1;df+=2) {
-          int af=f+df; if(af<0||af>7) continue;
-          if(r<7&&board[sqOf(r+1,af)]==B_P) { ppBonus+=15; break; }
-        }
-        score -= ppBonus;
-      }
+      if(passed) score -= passedScale*(20 + (7-r)*12);
       bool supported=false;
       for(int df=-1;df<=1;df+=2){int af=f+df;if(af<0||af>7)continue;
         for(int rr=7;rr>=r;rr--) if(board[sqOf(rr,af)]==B_P){supported=true;break;} if(supported)break;}
@@ -1691,18 +1628,6 @@ int evaluate() {
         if(isSquareAttacked(as,false)) attackCount++;
       }
       score -= attackCount * 14;
-      // Extra penalty: enemy rook or queen on open file aimed at king zone
-      for(int df=-1;df<=1;df++) {
-        int f2=kf+df; if(f2<0||f2>7) continue;
-        if(wFile[f2]) continue;  // not open if white pawn on file
-        // Scan upward from king for enemy rook/queen on this file
-        for(int r=kr+1;r<8;r++) {
-          int sq2=sqOf(r,f2); int pp=board[sq2];
-          if(!pp) continue;
-          if(IS_BLACK(pp) && (TYPE(pp)==ROOK||TYPE(pp)==QUEEN)) { score -= 22; }
-          break;
-        }
-      }
     }
     if(bKsq >= 0) {
       int kf = fileOf(bKsq), kr = rankOf(bKsq);
@@ -1722,17 +1647,6 @@ int evaluate() {
         if(isSquareAttacked(as,true)) attackCount++;
       }
       score += attackCount * 14;
-      // Extra penalty: enemy rook or queen on open file aimed at king zone
-      for(int df=-1;df<=1;df++) {
-        int f2=kf+df; if(f2<0||f2>7) continue;
-        if(bFile[f2]) continue;
-        for(int r=kr-1;r>=0;r--) {
-          int sq2=sqOf(r,f2); int pp=board[sq2];
-          if(!pp) continue;
-          if(IS_WHITE(pp) && (TYPE(pp)==ROOK||TYPE(pp)==QUEEN)) { score += 22; }
-          break;
-        }
-      }
     }
   }
 
@@ -1749,34 +1663,26 @@ int evaluate() {
   }
 
   // ── Queen safety — UNIVERSAL, all phases ─────────────────────────────────
+  // Penalise queen on any square attacked by an enemy piece (SEE-based)
   for(int s=0;s<64;s++) {
     int p=board[s]; if(TYPE(p)!=QUEEN) continue;
     bool isW = IS_WHITE(p);
     int sign = isW ? -1 : 1;
-    int pdir = isW ? 1 : -1;
+    // Attacked by enemy pawn directly?
+    int pdir = isW ? 1 : -1; // direction enemy pawns advance to attack this queen
     int ePawn = isW ? B_P : W_P;
     for(int df=-1;df<=1;df+=2) {
       int pr=rankOf(s)+pdir, pf=fileOf(s)+df;
       if(inBounds(pr,pf) && board[sqOf(pr,pf)]==ePawn) { score+=sign*55; break; }
     }
+    // Attacked by any enemy piece — use SEE to determine real danger
     int loss = seeCaptures(s, isW ? 2 : 1);
-    if(loss > 0) score += sign * min(loss, 120);
-
-    // ── Queen mobility approximation: penalty if hemmed (≤3 open ray directions)
-    // Count how many of the 8 ray directions have at least one reachable empty square.
-    {
-      const int qd[8][2]={{1,0},{-1,0},{0,1},{0,-1},{1,1},{1,-1},{-1,1},{-1,-1}};
-      int openRays = 0;
-      int r0=rankOf(s), f0=fileOf(s);
-      for(auto& d:qd) {
-        int nr=r0+d[0], nf=f0+d[1];
-        if(inBounds(nr,nf) && board[sqOf(nr,nf)]==EMPTY) openRays++;
-      }
-      if(openRays <= 3) score += sign * (4-openRays) * 12;
-    }
+    if(loss > 0) score += sign * min(loss, 120); // cap at 120 to avoid dominating eval
   }
 
   // ── UNIVERSAL piece safety — minor pieces on attacked squares ────────────
+  // Applies in ALL phases. Penalises knights and bishops sitting on squares
+  // where the opponent has a favourable capture (SEE > 0).
   for(int s=0;s<64;s++) {
     int p=board[s]; if(!p) continue;
     int t=TYPE(p); if(t!=KNIGHT && t!=BISHOP) continue;
@@ -1785,11 +1691,11 @@ int evaluate() {
     int loss = seeCaptures(s, attColor);
     if(loss > 0) {
       int sign = isW ? -1 : 1;
-      score += sign * (loss / 2);
+      score += sign * (loss / 2); // half penalty — already in PST, avoid double-count
     }
   }
 
-  // ── Development (opening only, symmetrical both sides) ───────────────────
+  // ── Development (opening only, now symmetrical both sides) ───────────────
   if(opening) {
     if(board[sqOf(0,1)]==W_N) score -= 28; if(board[sqOf(0,6)]==W_N) score -= 28;
     if(board[sqOf(0,2)]==W_B) score -= 22; if(board[sqOf(0,5)]==W_B) score -= 22;
@@ -1816,20 +1722,13 @@ int evaluate() {
     }
   }
 
-  // ── Rook on open/semi-open file + 7th rank bonus ─────────────────────────
+  // ── Rook on open/semi-open file ───────────────────────────────────────────
   for(int s=0;s<64;s++){
     int p=board[s]; if(TYPE(p)!=ROOK) continue;
-    int f=fileOf(s), r=rankOf(s);
+    int f=fileOf(s);
     bool wp=wFile[f], bp=bFile[f];
-    if(IS_WHITE(p)) {
-      if(!wp&&!bp) score+=22; else if(!wp) score+=11;
-      // Rook on 7th rank (rank index 6 = 7th from white's side)
-      if(r==6) score += endgame ? 35 : 22;
-    } else {
-      if(!bp&&!wp) score-=22; else if(!bp) score-=11;
-      // Rook on 7th rank (rank index 1 = 7th from black's side)
-      if(r==1) score -= endgame ? 35 : 22;
-    }
+    if(IS_WHITE(p)) { if(!wp&&!bp) score+=22; else if(!wp) score+=11; }
+    else            { if(!bp&&!wp) score-=22; else if(!bp) score-=11; }
   }
 
   // ── Bishop mobility ───────────────────────────────────────────────────────
@@ -1844,42 +1743,12 @@ int evaluate() {
     }
   }
 
-  // ── Knight mobility approximation ────────────────────────────────────────
-  // Count reachable squares (not occupied by own piece). Penalise if ≤2.
-  // Cheap: 8 jump checks, no recursion, no board mutation.
-  { const int kd[8][2]={{2,1},{2,-1},{-2,1},{-2,-1},{1,2},{1,-2},{-1,2},{-1,-2}};
-    for(int s=0;s<64;s++){
-      int p=board[s]; if(TYPE(p)!=KNIGHT) continue;
-      bool isW=IS_WHITE(p);
-      int myColor=isW?1:2;
-      int r0=rankOf(s),f0=fileOf(s), mob=0;
-      for(auto& d:kd){
-        int nr=r0+d[0],nf=f0+d[1];
-        if(inBounds(nr,nf) && COLOR(board[sqOf(nr,nf)])!=myColor) mob++;
-      }
-      // Penalty: 0 moves=40, 1 move=28, 2 moves=14
-      int pen=(mob==0)?40:(mob==1)?28:(mob==2)?14:0;
-      if(isW) score-=pen; else score+=pen;
-    }
-  }
-
   // ── Pawn threat on knights/bishops (outpost-aware, full SEE) ─────────────
-  // + Outpost bonus: positive reward for a piece on a genuine outpost
+  // Only called once per piece per eval — isOutpostSquare uses SEE internally
   for(int s=0;s<64;s++){
     int p=board[s]; if(!p) continue;
     if(TYPE(p)!=KNIGHT&&TYPE(p)!=BISHOP) continue;
     score += pieceThreatPenalty(s,p);
-
-    // Knight outpost positive bonus
-    if(TYPE(p)==KNIGHT && isOutpostSquare(s, COLOR(p))) {
-      bool isW = IS_WHITE(p);
-      int r=rankOf(s), f=fileOf(s);
-      // Central outpost (files c-f, ranks 4-5 from white's pov) worth more
-      int adjR = isW ? r : (7-r);
-      bool central = (f>=2 && f<=5 && adjR>=3 && adjR<=5);
-      int bonus = central ? 25 : 15;
-      if(isW) score+=bonus; else score-=bonus;
-    }
   }
 
   return score;
@@ -1925,15 +1794,8 @@ int getDrawScore() {
 
 // ─── Move ordering ────────────────────────────────────────────────────────────
 // Fully symmetrical for both colours. All heuristics apply to both sides.
-// ttFromSq/ttToSq: when non-zero, the matching move gets TT_SORT_BONUS to
-// guarantee it sorts first regardless of other heuristic scores.
-int moveScore(Move& m, int ttFromSq=0, int ttToSq=0) {
+int moveScore(Move& m) {
   int s = 0;
-
-  // ── 0. TT move priority ───────────────────────────────────────────────────
-  // Guaranteed to sort above any other move, including winning captures.
-  if(ttFromSq && (m.from==ttFromSq && m.to==ttToSq)) return TT_SORT_BONUS;
-
   uint8_t cap  = board[m.to];
   int piece    = board[m.from];
   int toR      = rankOf(m.to),   toF = fileOf(m.to);
@@ -2133,10 +1995,10 @@ int moveScore(Move& m, int ttFromSq=0, int ttToSq=0) {
 }
 
 
-void sortMoves(Move* moves, int count, int ttFrom=0, int ttTo=0) {
+void sortMoves(Move* moves, int count) {
   // Insertion sort with scores — good for small count (chess moves rarely >60)
   static int scores[128];  // static: avoids 512B stack alloc per call; safe — single search task
-  for(int i=0;i<count;i++) scores[i] = moveScore(moves[i], ttFrom, ttTo);
+  for(int i=0;i<count;i++) scores[i] = moveScore(moves[i]);
   for(int i=1;i<count;i++) {
     Move keyM = moves[i];
     int  keyS = scores[i];
@@ -2173,7 +2035,7 @@ int quiesce(int alpha, int beta) {
   Move* moves = qMoveBuf[myQLevel];
   int count;
   generateMoves(whiteToMove, moves, count, true);
-  sortMoves(moves, count, 0, 0);
+  sortMoves(moves, count);
 
   for(int i=0;i<count;i++) {
     Move& m = moves[i];
@@ -2245,9 +2107,7 @@ int alphaBeta(int depth, int alpha, int beta, bool maximizing, unsigned long sta
       whiteToMove = !whiteToMove;
       currentHash ^= zobSide;
 
-      // Fixed R=2 always. R=3 at depth≥5 was too aggressive, caused missed
-      // defensive resources in quiet positional positions (vs. strong opponents).
-      int R = 2;
+      int R = (depth >= 5) ? 3 : 2;  // adaptive null-move reduction
       int nullScore = -alphaBeta(depth-1-R, -beta, -beta+1, !maximizing, startMs);
 
       whiteToMove = savedWTM;
@@ -2260,8 +2120,7 @@ int alphaBeta(int depth, int alpha, int beta, bool maximizing, unsigned long sta
 
   if(depth==1 && !inCheck) {
     int ev = whiteToMove ? evaluate() : -evaluate();
-    // Raised margin 150→200: avoids over-pruning quiet positional moves.
-    if(ev < alpha - 200) {
+    if(ev < alpha - 300) {
       abDepthLevel = myLevel; return quiesce(alpha, beta);
     }
   }
@@ -2276,9 +2135,16 @@ int alphaBeta(int depth, int alpha, int beta, bool maximizing, unsigned long sta
     return getDrawScore();
   }
 
-  // Pass TT move coordinates directly to sortMoves so it gets TT_SORT_BONUS
-  // and is guaranteed to be searched first, regardless of other heuristic scores.
-  sortMoves(moves, count, ttMove.from, ttMove.to);
+  if(ttMove.from || ttMove.to) {
+    for(int i=0;i<count;i++) {
+      if(moves[i].from==ttMove.from && moves[i].to==ttMove.to) {
+        Move tmp=moves[0]; moves[0]=moves[i]; moves[i]=tmp;
+        break;
+      }
+    }
+  }
+
+  sortMoves(moves, count);
 
   int origAlpha = alpha;
   Move bestMove = {0,0,0,0};
@@ -2295,7 +2161,7 @@ int alphaBeta(int depth, int alpha, int beta, bool maximizing, unsigned long sta
     legalCount2++;
 
     if(doFutility && board[m.to]==EMPTY && !m.promo) {
-      if(futilityEval + 200 <= alpha) continue;
+      if(futilityEval + 150 <= alpha) continue;
     }
 
     HistoryEntry he;
@@ -2306,11 +2172,8 @@ int alphaBeta(int depth, int alpha, int beta, bool maximizing, unsigned long sta
     int depthIdx = min(depth, MAX_DEPTH-1);
     bool isKiller = (m.from==killers[depthIdx][0].from && m.to==killers[depthIdx][0].to) ||
                     (m.from==killers[depthIdx][1].from && m.to==killers[depthIdx][1].to);
-    // LMR: threshold raised to move ≥5 and depth ≥3.
-    // Previously ≥3/≥2 reduced too many moves against solid opponents who
-    // don't blunder — their "late" moves are often important defensive responses.
-    if(i >= 5 && depth >= 3 && board[m.to]==EMPTY && !m.promo && !inCheck && !isKiller) {
-      int R = (i >= 8 && depth >= 5) ? 2 : 1;  // R=2 only for very late moves at depth 5+
+    if(i >= 3 && depth >= 2 && board[m.to]==EMPTY && !m.promo && !inCheck && !isKiller) {
+      int R = (i >= 6 && depth >= 4) ? 2 : 1;  // R=2 for late moves at depth 4+
       score = -alphaBeta(depth-1-R, -alpha-1, -alpha, !maximizing, startMs);
       if(score > alpha && !searchAborted) {
         score = -alphaBeta(depth-1, -beta, -alpha, !maximizing, startMs);
@@ -2453,17 +2316,22 @@ Move getBookMove(int blackMoveNum) {
         candidate = tryMove(bPd7, sqOf(4,3));
       }
     }
-  } else if(blackMoveNum == 2) {
+  } else {
     // Move 2 — develop a knight or support the center.
     // CRITICAL: only suggest moves where the destination is NOT a pawn-kick trap.
+    // A square is a pawn-kick trap if it is attacked by a white pawn AND there is
+    // a white pawn on an adjacent file that can safely advance to re-attack it
+    // (i.e. NOT a genuine outpost). Safe outposts are fine even if currently attacked.
     auto isKickTrap = [&](int sq) -> bool {
       int r = rankOf(sq), f = fileOf(sq);
+      // Currently attacked by a white pawn?
       bool attacked = false;
       for(int df = -1; df <= 1; df += 2) {
         int pr = r - 1, pf = f + df;
         if(inBounds(pr, pf) && board[sqOf(pr, pf)] == W_P) { attacked = true; break; }
       }
       if(!attacked) return false;
+      // Check each adjacent file for a white pawn that can safely advance to threaten
       for(int df = -1; df <= 1; df += 2) {
         int adjF = f + df;
         if(adjF < 0 || adjF > 7) continue;
@@ -2482,49 +2350,76 @@ Move getBookMove(int blackMoveNum) {
               int pawnSafety = seeCaptures(attackSq, 2);
               board[attackSq]       = savedA;
               board[sqOf(rr, adjF)] = savedP;
-              if(pawnSafety <= 0) return true;
+              if(pawnSafety <= 0) return true;  // pawn push is safe → it's a trap
             }
             break;
           }
         }
       }
-      return false;
+      return false;  // attacked but no pawn can safely advance → safe outpost
     };
 
     if(wE4 || wE5) {
       if(bE5) {
+        // After 1.e4 e5 — develop Nf6 or Nc6, never to a pawn-attacked square
         int nc6 = sqOf(5,2), nf6 = sqOf(5,5);
-        if(!isKickTrap(nc6)) candidate = tryMove(bNb8, nc6);
-        if(!candidate.from && !isKickTrap(nf6)) candidate = tryMove(bNg8, nf6);
-        if(!candidate.from) candidate = tryMove(bPd7, sqOf(5,3));
+        if(!isKickTrap(nc6)) {
+          candidate = tryMove(bNb8, nc6);
+        }
+        if(!candidate.from && !isKickTrap(nf6)) {
+          candidate = tryMove(bNg8, nf6);
+        }
+        if(!candidate.from) {
+          // Knights both attacked — play d6 or Bc5
+          candidate = tryMove(bPd7, sqOf(5,3));  // d6 solid
+        }
       } else if(bC5) {
+        // After 1.e4 c5 Sicilian — play d6 or Nc6
         int nc6 = sqOf(5,2);
-        if(!isKickTrap(nc6)) candidate = tryMove(bNb8, nc6);
-        if(!candidate.from) candidate = tryMove(bPd7, sqOf(5,3));
+        if(!isKickTrap(nc6)) {
+          candidate = tryMove(bNb8, nc6);
+        }
+        if(!candidate.from) candidate = tryMove(bPd7, sqOf(5,3)); // d6
       } else if(bD5) {
+        // Scandinavian — recapture or Nf6
         int nf6 = sqOf(5,5);
-        if(!isKickTrap(nf6)) candidate = tryMove(bNg8, nf6);
-        if(!candidate.from) candidate = tryMove(bPe7, sqOf(5,4));
+        if(!isKickTrap(nf6)) {
+          candidate = tryMove(bNg8, nf6);
+        }
+        if(!candidate.from) candidate = tryMove(bPe7, sqOf(5,4)); // e6
       } else {
+        // Some other first move — just develop kingside knight safely
         int nf6 = sqOf(5,5);
-        if(!isKickTrap(nf6)) candidate = tryMove(bNg8, nf6);
+        if(!isKickTrap(nf6)) {
+          candidate = tryMove(bNg8, nf6);
+        }
         if(!candidate.from) candidate = tryMove(bPd7, sqOf(5,3));
       }
     } else if(wD4 || wD5) {
       if(bD5) {
+        // QGD-style — play e6 or Nf6
         int nf6 = sqOf(5,5);
-        if(!isKickTrap(nf6)) candidate = tryMove(bNg8, nf6);
-        if(!candidate.from) candidate = tryMove(bPe7, sqOf(5,4));
+        if(!isKickTrap(nf6)) {
+          candidate = tryMove(bNg8, nf6);
+        }
+        if(!candidate.from) candidate = tryMove(bPe7, sqOf(5,4)); // e6
       } else {
         int nf6 = sqOf(5,5);
-        if(!isKickTrap(nf6)) candidate = tryMove(bNg8, nf6);
-        if(!candidate.from) candidate = tryMove(bPd7, sqOf(4,3));
+        if(!isKickTrap(nf6)) {
+          candidate = tryMove(bNg8, nf6);
+        }
+        if(!candidate.from) candidate = tryMove(bPd7, sqOf(4,3)); // d5 break
       }
     } else if(wC4) {
       if(bE5 || bC5) {
         int nc6 = sqOf(5,2);
-        if(!isKickTrap(nc6)) candidate = tryMove(bNb8, nc6);
-        if(!candidate.from) { int nf6=sqOf(5,5); if(!isKickTrap(nf6)) candidate=tryMove(bNg8,nf6); }
+        if(!isKickTrap(nc6)) {
+          candidate = tryMove(bNb8, nc6);
+        }
+        if(!candidate.from) {
+          int nf6 = sqOf(5,5);
+          if(!isKickTrap(nf6)) candidate = tryMove(bNg8, nf6);
+        }
       } else {
         int nf6 = sqOf(5,5);
         if(!isKickTrap(nf6)) candidate = tryMove(bNg8, nf6);
@@ -2533,101 +2428,19 @@ Move getBookMove(int blackMoveNum) {
     } else if(wF4) {
       int nf6 = sqOf(5,5);
       if(!isKickTrap(nf6)) candidate = tryMove(bNg8, nf6);
-      if(!candidate.from) candidate = tryMove(bPe7, sqOf(5,4));
+      if(!candidate.from) candidate = tryMove(bPe7, sqOf(5,4)); // e6
     } else {
+      // Unknown opening — safe knight development
       int nf6 = sqOf(5,5), nc6 = sqOf(5,2);
-      if(bE5 || bD5) { if(!isKickTrap(nc6)) candidate = tryMove(bNb8, nc6); }
-      if(!candidate.from) { if(!isKickTrap(nf6)) candidate = tryMove(bNg8, nf6); }
+      if(bE5 || bD5) {
+        if(!isKickTrap(nc6)) candidate = tryMove(bNb8, nc6);
+      }
+      if(!candidate.from) {
+        if(!isKickTrap(nf6)) candidate = tryMove(bNg8, nf6);
+      }
       if(!candidate.from) {
         if(v%2==0) candidate = tryMove(bPe7, sqOf(4,4));
         else       candidate = tryMove(bPd7, sqOf(4,3));
-      }
-    }
-
-  } else if(blackMoveNum == 3) {
-    // Move 3 — develop bishop, castle prep, or central consolidation.
-    // Goal: get kingside bishop out and prepare short castle.
-    // All moves safety-checked: only returned if they exist in trueLegal.
-    int bBf8_cur = -1;  // find current square of black's f8 bishop
-    for(int s=0;s<64;s++) if(board[s]==B_B && fileOf(s)>=4) { bBf8_cur=s; break; }
-
-    bool bKnightOnF6 = (board[sqOf(5,5)]==B_N);
-    bool bKnightOnC6 = (board[sqOf(5,2)]==B_N);
-
-    // Priority 1: develop kingside bishop if still on f8
-    if(bBf8_cur == sqOf(7,5)) {
-      if(bE5 || board[sqOf(4,4)]==B_P) {
-        // Open game: Bc5 or Bb4
-        candidate = tryMove(sqOf(7,5), sqOf(4,2));  // Bc5
-        if(!candidate.from) candidate = tryMove(sqOf(7,5), sqOf(4,1));  // Bb4
-        if(!candidate.from) candidate = tryMove(sqOf(7,5), sqOf(5,3));  // Be7 safe retreat
-      } else if(bC5 || board[sqOf(4,2)]==B_P) {
-        // Sicilian: Fianchetto Bg7 or Be7
-        candidate = tryMove(sqOf(6,5), sqOf(5,6));  // g6 prep fianchetto
-        if(!candidate.from) candidate = tryMove(sqOf(7,5), sqOf(5,3));  // Be7
-      } else {
-        // Closed: Be7 solid
-        candidate = tryMove(sqOf(7,5), sqOf(5,3));  // Be7
-        if(!candidate.from) candidate = tryMove(sqOf(7,5), sqOf(4,2)); // Bc5
-      }
-    }
-    // Priority 2: if bishop already developed, castle if legal
-    if(!candidate.from) {
-      // Try castling short (O-O): king e8→g8
-      if(bCastle_K) candidate = tryMove(sqOf(7,4), sqOf(7,6));
-    }
-    // Priority 3: support center or develop queenside knight
-    if(!candidate.from) {
-      if(!bKnightOnC6) candidate = tryMove(bNb8, sqOf(5,2));  // Nc6
-    }
-    if(!candidate.from) {
-      // Solid pawn move: a6 or d6
-      candidate = tryMove(sqOf(6,0), sqOf(5,0));  // a6
-      if(!candidate.from) candidate = tryMove(bPd7, sqOf(5,3));  // d6
-    }
-
-  } else if(blackMoveNum == 4) {
-    // Move 4 — castle if not yet done, or complete development.
-    // Priority 1: castle short if available and king still on e8
-    if(bCastle_K && board[sqOf(7,4)]==B_K) {
-      candidate = tryMove(sqOf(7,4), sqOf(7,6));  // O-O
-    }
-    // Priority 2: castle long if short unavailable
-    if(!candidate.from && bCastle_Q && board[sqOf(7,4)]==B_K) {
-      candidate = tryMove(sqOf(7,4), sqOf(7,2));  // O-O-O
-    }
-    // Priority 3: develop queenside bishop if stuck
-    if(!candidate.from) {
-      for(int s=0;s<64;s++) {
-        if(board[s]==B_B && fileOf(s)<=3 && rankOf(s)==7) {
-          // Queenside bishop still on back rank — develop it
-          candidate = tryMove(s, sqOf(5,3));  // Be6
-          if(!candidate.from) candidate = tryMove(s, sqOf(5,1)); // Bd7 safe square
-          break;
-        }
-      }
-    }
-    // Priority 4: central consolidation — d5 break or d6
-    if(!candidate.from) {
-      if(board[sqOf(6,3)]==B_P) {
-        candidate = tryMove(sqOf(6,3), sqOf(4,3));  // d5
-        if(!candidate.from) candidate = tryMove(sqOf(6,3), sqOf(5,3)); // d6
-      }
-    }
-    // Priority 5: rook to open file if castled
-    if(!candidate.from) {
-      for(int s=0;s<64;s++) {
-        if(board[s]==B_R) {
-          int f=fileOf(s);
-          bool openF=true;
-          for(int r=0;r<8;r++) if(board[sqOf(r,f)]==B_P){openF=false;break;}
-          if(openF) {
-            // Move rook toward center file
-            candidate = tryMove(s, sqOf(rankOf(s), 3));
-            if(!candidate.from) candidate = tryMove(s, sqOf(rankOf(s), 4));
-            if(candidate.from) break;
-          }
-        }
       }
     }
   }
@@ -2674,22 +2487,17 @@ Move runSearchOnCore0() {
 }
 
 Move getBotMove() {
-  if(openingMoveIndex < 4) {
+  if(openingMoveIndex < 2) {
     Move bm = getBookMove(openingMoveIndex+1);
     if(bm.from || bm.to) {
       openingMoveIndex++;
       return bm;
     }
-    openingMoveIndex = 4;
+    openingMoveIndex = 2;
   }
 
   memset(killers, 0, sizeof(killers));
-
-  // Age history heuristic: halve all values before each new search.
-  // This prevents stale opening-phase history from distorting middlegame
-  // and endgame move ordering. Costs ~1ms on ESP32 for 64*64 int16_t array.
-  for(int i=0;i<64;i++) for(int j=0;j<64;j++) histHeuristic[i][j] >>= 1;
-
+  memset(histHeuristic, 0, sizeof(histHeuristic));
   searchAborted = false;
   nodeCount     = 0;
   abDepthLevel  = 0;
@@ -2699,7 +2507,7 @@ Move getBotMove() {
   Move* moves = rootMoveBuf;
   int count;
   generateMoves(false, moves, count, false);
-  sortMoves(moves, count, 0, 0);
+  sortMoves(moves, count);
 
   Move completedBestMove = {0,0,0,0};
   int  completedBestScore = -99999;
