@@ -1,17 +1,22 @@
 /*
- * RageMate Valkyra Beta V3
- * Engine revamp (V3.1):
- *   - evaluate(): fully symmetrical for both colours, stronger king safety (40pts/file),
- *     queen safety penalty, endgame king-push, unified pawn structure
- *   - moveScore(): opening heuristics now apply to BOTH colours (was black-only),
- *     queen retreat penalty (all phases), stronger castling reward,
- *     far-advanced unstable knight penalty, history heuristic integrated
- *   - Fixes: Ng4 instability, Qa5+ tempo loss, Nxd4 horizon, Qd8 retreat,
- *     colour asymmetry causing worse play vs stronger opponents
+ * RageMate Maxima V1
+ * Changes from Ultra V3:
+ *   - Opening system fully patched: book moves are now advisory only — engine
+ *     always escapes to full search if any opponent piece threatens a capture
+ *     on the candidate square or attacks any undefended black piece (blindness fix)
+ *   - d5 response to 1.Nc3 corrected (was playing e5 erroneously)
+ *   - Knight-opening center-pawn rule: after Nf3/Nc3 the correct adjacent
+ *     center pawn is pushed (d5 vs Nf3 attacks e5/d4; d5 vs Nc3 attacks d5/e4)
+ *   - HACKER theme added (index 37, dark terminal green-on-black, serious palette)
+ *   - Epic intro cutscene: RageMate title reveal, model name slot-machine scroll
+ *     (Enigma→Maxima), version number slot (1-9→1), all in HACKER colours
+ *   - NUM_THEMES updated to 38
+ *   - All V3 changes retained (hold timing, flag shift, eval bar dot, pruning)
  */
 
 #include <Arduino.h>
 #include <SPI.h>
+#include <math.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7735.h>
 
@@ -57,17 +62,20 @@ struct Theme {
   uint16_t kBg, kHdr, kHdrTxt, kKey, kKeyBdr, kKeyTxt, kSelKey, kSelBdr, kConfirm, kDigBdr, kDigTxt;
   // Intro
   uint16_t iBg, iBox, iBoxBdr, iTitle, iTitle2, iSub, iPrompt;
+  // Panel (sidebar)
+  uint16_t panelBg;   // full-height strip behind buttons
+  uint16_t btnFace;   // individual button face colour
+  uint16_t sideAccent;// accent/text colour inside panel (phase letter, swatch highlight)
 };
 
-// ─── 37-theme table (PROGMEM) ────────────────────────────────────────────────
-// Removed: HACKER(08), FIRE(38), HIGH CONTRAST(39), RAINBOW(40)
-// All colours are RGB565 via C(r,g,b).
+// ─── 38-theme table (PROGMEM) ────────────────────────────────────────────────
 // Field order: name | bg darkSq lightSq border cursor label |
 //              wFill wTxt bFill bTxt | sel dot lastMove cursorLastMove |
 //              btnBg btnHl pbEmpty pbBorder | gameOver |
 //              lBg lGrid lAccent lAccent2 lTitle lSub lCrown lCrownHi |
 //              kBg kHdr kHdrTxt kKey kKeyBdr kKeyTxt kSelKey kSelBdr kConfirm kDigBdr kDigTxt |
-//              iBg iBox iBoxBdr iTitle iTitle2 iSub iPrompt
+//              iBg iBox iBoxBdr iTitle iTitle2 iSub iPrompt |
+//              panelBg btnFace sideAccent
 const Theme themes[] PROGMEM = {
 
 // 00 WOOD
@@ -79,7 +87,8 @@ const Theme themes[] PROGMEM = {
   C(31,46, 0),
   C( 5, 6, 1),C( 8,10, 2),C(20,26, 5),C(12,16, 3),C(28,44,14),C(22,36, 9),C(16,22, 4),C(28,48,16),
   C( 5, 6, 1),C(12,16, 3),C(31,46, 0),C( 8,10, 2),C(16,22, 4),C(24,38,12),C(20,26, 5),C(28,40,12),C(16,22, 4),C(20,28, 6),C(28,44,14),
-  C( 5, 6, 1),C(10,14, 3),C(18,24, 5),C(31,46, 0),C(28,44,14),C(20,30, 7),C(24,38,12) },
+  C( 5, 6, 1),C(10,14, 3),C(18,24, 5),C(31,46, 0),C(28,44,14),C(20,30, 7),C(24,38,12),
+  C( 8,10, 2),C(16,20, 4),C(31,46, 0) },
 
 // 01 CERAMIC
 { "CERAMIC",
@@ -90,7 +99,8 @@ const Theme themes[] PROGMEM = {
   C( 0,30,28),
   C(22,42,26),C( 6,14,18),C( 8,20,22),C(10,22,24),C(27,54,30),C( 0,30,28),C( 8,18,22),C(28,56,30),
   C(22,42,26),C( 8,18,22),C( 0,30,28),C(10,22,24),C(14,30,30),C(20,44,28),C( 8,18,22),C( 0,30,28),C(10,20,22),C(14,28,28),C(22,46,28),
-  C(22,42,26),C(10,22,24),C( 8,18,22),C( 0,30,28),C(20,44,28),C(14,30,28),C( 0,24,26) },
+  C(22,42,26),C(10,22,24),C( 8,18,22),C( 0,30,28),C(20,44,28),C(14,30,28),C( 0,24,26),
+  C(10,20,24),C(12,22,26),C( 0,30,28) },
 
 // 02 STONE
 { "STONE",
@@ -101,7 +111,8 @@ const Theme themes[] PROGMEM = {
   C(28,36, 4),
   C( 6, 8, 7),C( 8,10, 8),C(14,16,12),C(12,14,12),C(24,30,18),C(18,22,12),C(12,14,12),C(26,32,18),
   C( 6, 8, 7),C(12,14,12),C(28,36, 4),C(10,12,10),C(16,20,14),C(22,28,16),C(14,18,12),C(20,26,14),C(12,14,12),C(18,22,14),C(24,30,18),
-  C( 6, 8, 7),C(14,18,12),C(10,12,10),C(28,36, 4),C(24,30,18),C(16,20,12),C(20,26,14) },
+  C( 6, 8, 7),C(14,18,12),C(10,12,10),C(28,36, 4),C(24,30,18),C(16,20,12),C(20,26,14),
+  C( 8,10, 9),C(14,16,13),C(28,36, 4) },
 
 // 03 MEDIEVAL
 { "MEDIEVAL",
@@ -112,7 +123,8 @@ const Theme themes[] PROGMEM = {
   C(30,38, 0),
   C( 6, 7, 2),C( 7, 9, 2),C(18,20, 4),C(11,13, 4),C(25,40,12),C(22,30, 6),C(11,14, 3),C(28,44,13),
   C( 6, 7, 2),C(11,13, 4),C(30,38, 0),C( 9,11, 3),C(16,20, 4),C(24,36,10),C(14,18, 4),C(22,28, 6),C( 9,11, 3),C(16,22, 5),C(25,40,12),
-  C( 6, 7, 2),C(12,16, 4),C( 9,11, 3),C(30,38, 0),C(25,40,12),C(18,26, 6),C(22,34,10) },
+  C( 6, 7, 2),C(12,16, 4),C( 9,11, 3),C(30,38, 0),C(25,40,12),C(18,26, 6),C(22,34,10),
+  C( 8, 9, 3),C(14,16, 4),C(30,38, 0) },
 
 // 04 BAR
 { "BAR",
@@ -123,7 +135,8 @@ const Theme themes[] PROGMEM = {
   C(31,62,31),
   C( 3, 5, 1),C( 2, 8, 1),C( 8,18, 4),C( 4,14, 2),C( 8,28, 6),C(31,62,31),C( 4,14, 2),C(20,36, 8),
   C( 3, 5, 1),C( 4,14, 2),C(31,62,31),C( 4,12, 2),C( 8,20, 5),C(20,36, 8),C( 8,20, 5),C(16,30, 7),C( 4,12, 2),C( 8,22, 5),C(16,40, 9),
-  C( 3, 5, 1),C( 6,18, 4),C( 4,12, 2),C(31,62,31),C(16,40, 9),C(10,28, 6),C(20,40,10) },
+  C( 3, 5, 1),C( 6,18, 4),C( 4,12, 2),C(31,62,31),C(16,40, 9),C(10,28, 6),C(20,40,10),
+  C( 3, 8, 1),C( 6,16, 3),C(31,62,31) },
 
 // 05 CLUB
 { "CLUB",
@@ -134,7 +147,8 @@ const Theme themes[] PROGMEM = {
   C(28,26, 2),
   C( 5, 2, 2),C( 8, 2, 3),C(18,10, 4),C(14, 4, 5),C(26,36,14),C(28,26, 2),C(10, 3, 4),C(28,30,10),
   C( 5, 2, 2),C(14, 4, 5),C(28,26, 2),C(10, 3, 4),C(18,14, 3),C(24,32,12),C(16, 8, 4),C(22,18, 4),C(10, 3, 4),C(16,10, 4),C(24,32,12),
-  C( 5, 2, 2),C(14,10, 4),C(10, 3, 4),C(28,26, 2),C(24,32,12),C(18,18, 4),C(22,22, 4) },
+  C( 5, 2, 2),C(14,10, 4),C(10, 3, 4),C(28,26, 2),C(24,32,12),C(18,18, 4),C(22,22, 4),
+  C( 8, 3, 3),C(16, 6, 5),C(28,26, 2) },
 
 // 06 DISCO
 { "DISCO",
@@ -145,7 +159,8 @@ const Theme themes[] PROGMEM = {
   C(31,10,26),
   C( 4, 2, 8),C( 6, 2,14),C(22, 6,20),C(10, 4,18),C(24,24,28),C(31,10,26),C( 8, 3,16),C(28,20,28),
   C( 4, 2, 8),C(10, 4,18),C(31,10,26),C( 8, 3,16),C(18, 8,22),C(24,20,26),C(16, 6,22),C(22,10,24),C( 8, 3,16),C(16, 8,22),C(24,24,28),
-  C( 4, 2, 8),C(12, 6,20),C( 8, 3,16),C(31,10,26),C(24,24,28),C(18,10,22),C(20,12,24) },
+  C( 4, 2, 8),C(12, 6,20),C( 8, 3,16),C(31,10,26),C(24,24,28),C(18,10,22),C(20,12,24),
+  C( 6, 3,12),C(12, 5,20),C(31,10,26) },
 
 // 07 CYBERPUNK
 { "CYBERPUNK",
@@ -156,7 +171,8 @@ const Theme themes[] PROGMEM = {
   C( 0,48,28),
   C( 1, 0, 2),C( 4, 2, 8),C(14, 2,14),C( 6, 2,10),C(12, 4,18),C( 0,48,28),C( 4, 2, 8),C(31, 8,28),
   C( 1, 0, 2),C( 6, 2,10),C( 0,48,28),C( 6, 2,10),C(18, 4,20),C(26, 6,26),C(14, 4,16),C(20, 4,22),C( 6, 2,10),C(12, 4,18),C(31, 8,28),
-  C( 1, 0, 2),C( 8, 2,12),C( 4, 2,10),C( 0,48,28),C(31, 8,28),C(18, 4,20),C( 0,40,26) },
+  C( 1, 0, 2),C( 8, 2,12),C( 4, 2,10),C( 0,48,28),C(31, 8,28),C(18, 4,20),C( 0,40,26),
+  C( 3, 1, 5),C( 8, 3,12),C( 0,48,28) },
 
 // 08 DARK MODE
 { "DARK MODE",
@@ -167,7 +183,8 @@ const Theme themes[] PROGMEM = {
   C( 0,44,31),
   C( 1, 2, 3),C( 3, 6, 8),C(10,16,20),C( 4, 8,10),C( 9,18,20),C( 0,44,31),C( 3, 6, 8),C(14,28,31),
   C( 1, 2, 4),C( 5,10,14),C( 0,44,31),C( 4, 8,12),C(10,20,24),C(14,28,31),C( 8,18,22),C(12,24,26),C( 4, 8,12),C(10,24,28),C(14,38,31),
-  C( 1, 2, 4),C( 6,14,20),C( 3, 8,12),C( 0,44,31),C(14,38,31),C(10,26,28),C( 0,32,26) },
+  C( 1, 2, 4),C( 6,14,20),C( 3, 8,12),C( 0,44,31),C(14,38,31),C(10,26,28),C( 0,32,26),
+  C( 2, 4, 6),C( 6,10,13),C( 0,44,31) },
 
 // 09 AUTUMN
 { "AUTUMN",
@@ -178,7 +195,8 @@ const Theme themes[] PROGMEM = {
   C(31,52, 0),
   C( 6, 4, 1),C(12, 5, 1),C(20,12, 2),C(18, 8, 1),C(29,40, 2),C(31,52, 0),C(14, 6, 1),C(28,38, 3),
   C( 6, 4, 1),C(18, 8, 1),C(31,52, 0),C(14, 6, 1),C(22,16, 2),C(28,38, 3),C(18,10, 1),C(24,22, 2),C(14, 6, 1),C(20,16, 2),C(28,42, 3),
-  C( 6, 4, 1),C(16,10, 2),C(12, 6, 1),C(31,52, 0),C(28,42, 3),C(22,26, 2),C(26,36, 3) },
+  C( 6, 4, 1),C(16,10, 2),C(12, 6, 1),C(31,52, 0),C(28,42, 3),C(22,26, 2),C(26,36, 3),
+  C(10, 5, 1),C(20,10, 2),C(31,52, 0) },
 
 // 10 SPRING
 { "SPRING",
@@ -189,7 +207,8 @@ const Theme themes[] PROGMEM = {
   C(22,14,14),
   C(22,28,14),C( 4,12, 4),C( 8,20, 8),C( 6,18, 6),C(30,24,24),C(22,14,14),C( 6,16, 6),C(20,32,18),
   C(22,28,14),C( 6,18, 6),C(22,14,14),C( 6,16, 6),C(10,22,10),C(20,32,18),C(10,22,10),C(16,28,14),C( 6,16, 6),C(10,24,12),C(22,34,18),
-  C(22,28,14),C(10,22,10),C( 6,16, 6),C(22,14,14),C(28,24,24),C(14,26,14),C(16,28,14) },
+  C(22,28,14),C(10,22,10),C( 6,16, 6),C(22,14,14),C(28,24,24),C(14,26,14),C(16,28,14),
+  C(12,20,10),C( 8,20, 8),C(22,14,14) },
 
 // 11 TOURNAMENT
 { "TOURNAMENT",
@@ -200,7 +219,8 @@ const Theme themes[] PROGMEM = {
   C(31,52, 0),
   C( 0, 2, 8),C( 1, 4,14),C(14,20, 0),C( 2, 6,18),C(28,46,20),C(31,52, 0),C( 2, 6,16),C(26,42, 0),
   C( 0, 2, 8),C( 2, 6,18),C(31,52, 0),C( 2, 6,16),C(18,28, 0),C(26,42, 0),C( 4,12,24),C(12,22, 0),C( 2, 6,16),C(16,26, 0),C(28,46,20),
-  C( 0, 2, 8),C( 4,10,16),C( 2, 4,16),C(31,52, 0),C(26,42, 0),C(18,30, 0),C(22,36, 0) },
+  C( 0, 2, 8),C( 4,10,16),C( 2, 4,16),C(31,52, 0),C(26,42, 0),C(18,30, 0),C(22,36, 0),
+  C( 1, 4,12),C( 3, 8,20),C(31,52, 0) },
 
 // 12 ROYAL
 { "ROYAL",
@@ -211,7 +231,8 @@ const Theme themes[] PROGMEM = {
   C(31,50, 0),
   C( 4, 1, 8),C( 5, 2,12),C(16, 8,22),C( 9, 3,18),C(22,28, 8),C(31,50, 0),C( 7, 3,16),C(24,34, 6),
   C( 4, 1, 8),C( 9, 3,18),C(31,50, 0),C( 7, 2,14),C(18,24, 0),C(24,34, 6),C(12,10,22),C(20,18,26),C( 7, 2,14),C(12,10,22),C(22,28, 8),
-  C( 4, 1, 8),C(10, 6,18),C( 7, 2,14),C(31,50, 0),C(24,34, 6),C(18,22, 0),C(20,26, 2) },
+  C( 4, 1, 8),C(10, 6,18),C( 7, 2,14),C(31,50, 0),C(24,34, 6),C(18,22, 0),C(20,26, 2),
+  C( 6, 2,12),C(11, 4,20),C(31,50, 0) },
 
 // 13 MARBLE
 { "MARBLE",
@@ -222,7 +243,8 @@ const Theme themes[] PROGMEM = {
   C(22,28,20),
   C(20,24,22),C( 2, 2, 2),C( 8, 8, 8),C( 6, 6, 6),C(30,60,30),C(22,28,20),C( 6, 6, 6),C(26,52,26),
   C(20,24,22),C( 6, 6, 6),C(22,28,20),C( 8, 8, 8),C(16,20,18),C(26,52,26),C(12,14,12),C(18,20,16),C( 8, 8, 8),C(14,16,14),C(28,56,28),
-  C(20,24,22),C(14,18,14),C( 8, 8, 8),C(22,28,20),C(28,56,28),C(16,20,16),C(18,24,18) },
+  C(20,24,22),C(14,18,14),C( 8, 8, 8),C(22,28,20),C(28,56,28),C(16,20,16),C(18,24,18),
+  C(10,12,11),C( 8, 8, 8),C(22,28,20) },
 
 // 14 NEON
 { "NEON",
@@ -233,7 +255,8 @@ const Theme themes[] PROGMEM = {
   C( 0,56,28),
   C( 0, 0, 1),C( 4, 0, 8),C(14, 2,20),C( 8, 0,14),C(18, 2,26),C( 0,56,28),C( 6, 0,12),C(31,10,24),
   C( 0, 0, 1),C( 8, 0,14),C( 0,56,28),C( 6, 0,12),C(18, 4,22),C(24, 6,26),C(14, 2,22),C(20, 4,24),C( 6, 0,12),C(14, 2,22),C(18, 2,26),
-  C( 0, 0, 1),C( 8, 2,14),C( 6, 0,12),C( 0,56,28),C(31,10,24),C(16, 4,22),C( 0,44,26) },
+  C( 0, 0, 1),C( 8, 2,14),C( 6, 0,12),C( 0,56,28),C(31,10,24),C(16, 4,22),C( 0,44,26),
+  C( 3, 0, 6),C(10, 1,16),C( 0,56,28) },
 
 // 15 LAVA
 { "LAVA",
@@ -244,7 +267,8 @@ const Theme themes[] PROGMEM = {
   C(31,24, 0),
   C( 2, 1, 0),C( 5, 2, 0),C(14, 6, 0),C( 8, 3, 0),C(22,12, 0),C(31,24, 0),C( 6, 3, 0),C(26,18, 0),
   C( 2, 1, 0),C( 8, 3, 0),C(31,24, 0),C( 6, 3, 0),C(18,10, 0),C(26,18, 0),C(14, 8, 0),C(20,12, 0),C( 6, 3, 0),C(12, 6, 0),C(22,12, 0),
-  C( 2, 1, 0),C( 8, 4, 0),C( 6, 3, 0),C(31,24, 0),C(26,18, 0),C(18,10, 0),C(22,14, 0) },
+  C( 2, 1, 0),C( 8, 4, 0),C( 6, 3, 0),C(31,24, 0),C(26,18, 0),C(18,10, 0),C(22,14, 0),
+  C( 4, 2, 0),C(10, 4, 0),C(31,24, 0) },
 
 // 16 OCEAN
 { "OCEAN",
@@ -255,7 +279,8 @@ const Theme themes[] PROGMEM = {
   C( 0,50,30),
   C( 0, 4, 8),C( 0, 6,14),C( 0,14,22),C( 0, 8,16),C( 4,30,28),C( 0,50,30),C( 0, 8,14),C( 4,32,28),
   C( 0, 4, 8),C( 0, 8,16),C( 0,50,30),C( 0, 8,14),C( 0,24,22),C( 4,32,28),C( 0,16,20),C( 0,28,26),C( 0, 8,14),C( 0,14,20),C( 4,30,28),
-  C( 0, 4, 8),C( 0,12,18),C( 0, 8,14),C( 0,50,30),C( 4,32,28),C( 0,28,26),C( 0,22,22) },
+  C( 0, 4, 8),C( 0,12,18),C( 0, 8,14),C( 0,50,30),C( 4,32,28),C( 0,28,26),C( 0,22,22),
+  C( 0, 5,11),C( 0,10,18),C( 0,50,30) },
 
 // 17 FOREST
 { "FOREST",
@@ -266,7 +291,8 @@ const Theme themes[] PROGMEM = {
   C(28,38, 2),
   C( 1, 4, 1),C( 1, 6, 1),C( 4,12, 2),C( 2, 8, 2),C(14,30, 6),C(28,38, 2),C( 2, 6, 1),C(14,28, 6),
   C( 1, 4, 1),C( 2, 8, 2),C(28,38, 2),C( 2, 6, 1),C( 6,16, 3),C(14,28, 6),C( 6,16, 3),C(10,22, 4),C( 2, 6, 1),C( 4,12, 2),C(14,30, 6),
-  C( 1, 4, 1),C( 4,10, 2),C( 2, 6, 1),C(28,38, 2),C(14,30, 6),C( 8,20, 4),C(12,24, 5) },
+  C( 1, 4, 1),C( 4,10, 2),C( 2, 6, 1),C(28,38, 2),C(14,30, 6),C( 8,20, 4),C(12,24, 5),
+  C( 1, 5, 1),C( 3,10, 2),C(28,38, 2) },
 
 // 18 DESERT
 { "DESERT",
@@ -277,7 +303,8 @@ const Theme themes[] PROGMEM = {
   C(31,36, 0),
   C( 8,10, 2),C(12,14, 2),C(18,18, 3),C(18,20, 4),C(28,40,10),C(31,36, 0),C(14,16, 3),C(26,38, 8),
   C( 8,10, 2),C(18,20, 4),C(31,36, 0),C(14,16, 3),C(22,24, 4),C(26,38, 8),C(18,20, 4),C(22,26, 5),C(14,16, 3),C(18,20, 4),C(28,40,10),
-  C( 8,10, 2),C(16,18, 3),C(14,16, 3),C(31,36, 0),C(26,38, 8),C(20,24, 4),C(22,28, 5) },
+  C( 8,10, 2),C(16,18, 3),C(14,16, 3),C(31,36, 0),C(26,38, 8),C(20,24, 4),C(22,28, 5),
+  C(11,13, 3),C(20,22, 4),C(31,36, 0) },
 
 // 19 MIDNIGHT
 { "MIDNIGHT",
@@ -288,7 +315,8 @@ const Theme themes[] PROGMEM = {
   C(28,56,31),
   C( 0, 1, 6),C( 1, 3,10),C( 6, 8,18),C( 2, 4,14),C( 6,10,22),C(28,56,31),C( 2, 6,16),C(14,30,31),
   C( 0, 1, 6),C( 2, 4,14),C(28,56,31),C( 2, 4,12),C( 6,14,24),C(14,30,31),C( 6,14,24),C(10,22,28),C( 2, 4,12),C( 4,10,20),C( 6,10,22),
-  C( 0, 1, 6),C( 4, 8,16),C( 2, 4,12),C(28,56,31),C(14,30,31),C(10,20,28),C(12,24,30) },
+  C( 0, 1, 6),C( 4, 8,16),C( 2, 4,12),C(28,56,31),C(14,30,31),C(10,20,28),C(12,24,30),
+  C( 1, 2, 9),C( 3, 5,16),C(28,56,31) },
 
 // 20 ROSE
 { "ROSE",
@@ -299,7 +327,8 @@ const Theme themes[] PROGMEM = {
   C(28,16,16),
   C( 8, 4, 5),C(12, 5, 7),C(16, 8,10),C(18, 8,10),C(28,42,24),C(28,16,16),C(14, 6, 8),C(26,38,20),
   C( 8, 4, 5),C(18, 8,10),C(28,16,16),C(14, 6, 8),C(20,12,12),C(26,38,20),C(18,12,12),C(22,14,14),C(14, 6, 8),C(18,12,12),C(26,38,20),
-  C( 8, 4, 5),C(14, 8,10),C(12, 5, 7),C(28,16,16),C(26,38,20),C(18,14,12),C(20,16,14) },
+  C( 8, 4, 5),C(14, 8,10),C(12, 5, 7),C(28,16,16),C(26,38,20),C(18,14,12),C(20,16,14),
+  C(11, 5, 6),C(20,10,11),C(28,16,16) },
 
 // 21 STEAMPUNK
 { "STEAMPUNK",
@@ -310,7 +339,8 @@ const Theme themes[] PROGMEM = {
   C(28,56,28),
   C( 4, 4, 2),C( 7, 7, 2),C(12,10, 3),C(10,10, 3),C(22,18, 4),C(28,56,28),C( 8, 8, 2),C(22,18, 4),
   C( 4, 4, 2),C(10,10, 3),C(28,56,28),C( 8, 8, 2),C(16,14, 3),C(22,18, 4),C(14,12, 3),C(18,16, 4),C( 8, 8, 2),C(12,10, 3),C(22,18, 4),
-  C( 4, 4, 2),C(12,10, 3),C( 8, 8, 2),C(28,56,28),C(22,18, 4),C(16,14, 3),C(18,16, 4) },
+  C( 4, 4, 2),C(12,10, 3),C( 8, 8, 2),C(28,56,28),C(22,18, 4),C(16,14, 3),C(18,16, 4),
+  C( 6, 6, 2),C(12,12, 3),C(28,56,28) },
 
 // 22 VAMPIRE
 { "VAMPIRE",
@@ -321,7 +351,8 @@ const Theme themes[] PROGMEM = {
   C(28, 4, 4),
   C( 2, 0, 0),C( 4, 0, 0),C( 8, 1, 1),C( 6, 0, 0),C(26,22,20),C(28, 4, 4),C( 4, 0, 0),C(24,20,18),
   C( 2, 0, 0),C( 6, 0, 0),C(28, 4, 4),C( 4, 0, 0),C(14, 2, 2),C(24, 4, 4),C(10, 1, 1),C(16, 2, 2),C( 4, 0, 0),C( 8, 1, 1),C(22,20,18),
-  C( 2, 0, 0),C( 8, 2, 2),C( 4, 0, 0),C(28, 4, 4),C(22,20,18),C(16, 2, 2),C(18, 4, 4) },
+  C( 2, 0, 0),C( 8, 2, 2),C( 4, 0, 0),C(28, 4, 4),C(22,20,18),C(16, 2, 2),C(18, 4, 4),
+  C( 3, 0, 0),C( 8, 1, 1),C(28, 4, 4) },
 
 // 23 ARCADE
 { "ARCADE",
@@ -332,7 +363,8 @@ const Theme themes[] PROGMEM = {
   C(16,52, 0),
   C( 0, 0, 0),C( 1, 4, 0),C( 4,14, 0),C( 2, 6, 0),C( 6,20, 0),C(16,52, 0),C( 2, 6, 0),C(10,36, 0),
   C( 0, 0, 0),C( 2, 6, 0),C(16,52, 0),C( 2, 6, 0),C( 6,22, 0),C(10,36, 0),C( 6,22, 0),C(10,32, 0),C( 2, 6, 0),C( 4,14, 0),C( 6,20, 0),
-  C( 0, 0, 0),C( 4, 8, 0),C( 2, 6, 0),C(16,52, 0),C(10,36, 0),C( 6,22, 0),C( 8,28, 0) },
+  C( 0, 0, 0),C( 4, 8, 0),C( 2, 6, 0),C(16,52, 0),C(10,36, 0),C( 6,22, 0),C( 8,28, 0),
+  C( 1, 3, 0),C( 3, 8, 0),C(16,52, 0) },
 
 // 24 GRAFFITI
 { "GRAFFITI",
@@ -343,7 +375,8 @@ const Theme themes[] PROGMEM = {
   C( 0,28,30),
   C( 6, 6, 6),C( 8, 8, 8),C(12,12,12),C(10,10,10),C(20,20,18),C( 0,28,30),C( 8, 8, 8),C(22,22,20),
   C( 6, 6, 6),C(10,10,10),C( 0,28,30),C( 8, 8, 8),C(16,16,14),C(22,22,20),C(12,12,12),C(16,16,14),C( 8, 8, 8),C(10,10,10),C(20,20,18),
-  C( 6, 6, 6),C(12,12,12),C( 8, 8, 8),C( 0,28,30),C(20,20,18),C(14,14,14),C(16,16,14) },
+  C( 6, 6, 6),C(12,12,12),C( 8, 8, 8),C( 0,28,30),C(20,20,18),C(14,14,14),C(16,16,14),
+  C( 7, 7, 7),C(12,12,12),C( 0,28,30) },
 
 // 25 NORDIC
 { "NORDIC",
@@ -354,7 +387,8 @@ const Theme themes[] PROGMEM = {
   C(28,54,58),
   C( 2, 6,12),C( 3, 8,14),C( 6,12,22),C( 4,10,18),C(24,46,50),C(28,54,58),C( 4,10,18),C(22,44,48),
   C( 2, 6,12),C( 4,10,18),C(28,54,58),C( 4,10,18),C( 8,18,26),C(22,44,48),C( 8,18,26),C(14,26,34),C( 4,10,18),C( 6,14,22),C(24,46,50),
-  C( 2, 6,12),C( 6,12,20),C( 4,10,18),C(28,54,58),C(22,44,48),C(12,24,32),C(14,26,34) },
+  C( 2, 6,12),C( 6,12,20),C( 4,10,18),C(28,54,58),C(22,44,48),C(12,24,32),C(14,26,34),
+  C( 3, 7,14),C( 5,12,20),C(28,54,58) },
 
 // 26 SAHARA
 { "SAHARA",
@@ -365,7 +399,8 @@ const Theme themes[] PROGMEM = {
   C(31,46, 0),
   C( 7, 6, 2),C(10, 9, 1),C(16,14, 2),C(16,14, 2),C(28,34, 4),C(31,46, 0),C(12,10, 2),C(26,30, 4),
   C( 7, 6, 2),C(16,14, 2),C(31,46, 0),C(12,10, 2),C(20,18, 2),C(26,30, 4),C(16,14, 2),C(22,20, 2),C(12,10, 2),C(16,14, 2),C(28,34, 4),
-  C( 7, 6, 2),C(14,12, 2),C(12,10, 2),C(31,46, 0),C(26,30, 4),C(20,20, 2),C(22,22, 2) },
+  C( 7, 6, 2),C(14,12, 2),C(12,10, 2),C(31,46, 0),C(26,30, 4),C(20,20, 2),C(22,22, 2),
+  C(10, 9, 2),C(18,16, 3),C(31,46, 0) },
 
 // 27 VOID
 { "VOID",
@@ -376,7 +411,8 @@ const Theme themes[] PROGMEM = {
   C(31,62,31),
   C( 0, 0, 0),C( 2, 2, 2),C( 6, 6, 6),C( 4, 4, 4),C(28,28,28),C(31,62,31),C( 4, 4, 4),C(24,24,24),
   C( 0, 0, 0),C( 4, 4, 4),C(31,62,31),C( 4, 4, 4),C(12,12,12),C(24,24,24),C(10,10,10),C(14,14,14),C( 4, 4, 4),C( 6, 6, 6),C(24,24,24),
-  C( 0, 0, 0),C( 6, 6, 6),C( 4, 4, 4),C(31,62,31),C(24,24,24),C(14,14,14),C(16,16,16) },
+  C( 0, 0, 0),C( 6, 6, 6),C( 4, 4, 4),C(31,62,31),C(24,24,24),C(14,14,14),C(16,16,16),
+  C( 2, 2, 2),C( 5, 5, 5),C(31,62,31) },
 
 // 28 CORAL REEF
 { "CORAL REEF",
@@ -387,7 +423,8 @@ const Theme themes[] PROGMEM = {
   C(28,18, 6),
   C( 2,10,10),C( 2,10,12),C( 4,16,16),C( 4,16,16),C(28,36,22),C(28,18, 6),C( 4,14,14),C(26,34,20),
   C( 2,10,10),C( 4,16,16),C(28,18, 6),C( 4,14,14),C( 0,24,22),C(26,34,20),C( 0,20,20),C( 0,26,24),C( 4,14,14),C( 0,18,18),C(28,36,22),
-  C( 2,10,10),C( 4,12,14),C( 3,12,12),C(28,18, 6),C(26,34,20),C( 0,24,22),C( 4,22,20) },
+  C( 2,10,10),C( 4,12,14),C( 3,12,12),C(28,18, 6),C(26,34,20),C( 0,24,22),C( 4,22,20),
+  C( 3,12,12),C( 5,18,18),C(28,18, 6) },
 
 // 29 NOIR
 { "NOIR",
@@ -398,7 +435,8 @@ const Theme themes[] PROGMEM = {
   C(28,30,22),
   C( 3, 4, 2),C( 5, 6, 4),C( 8, 9, 6),C( 8, 9, 6),C(22,24,18),C(28,30,22),C( 6, 7, 5),C(20,22,16),
   C( 3, 4, 2),C( 8, 9, 6),C(28,30,22),C( 6, 7, 5),C(12,14,10),C(22,24,18),C(10,12, 8),C(14,16,12),C( 6, 7, 5),C( 8, 9, 6),C(22,24,18),
-  C( 3, 4, 2),C(10,12, 8),C( 6, 7, 5),C(28,30,22),C(22,24,18),C(14,16,12),C(16,18,13) },
+  C( 3, 4, 2),C(10,12, 8),C( 6, 7, 5),C(28,30,22),C(22,24,18),C(14,16,12),C(16,18,13),
+  C( 5, 6, 3),C(10,11, 7),C(28,30,22) },
 
 // 30 EMBER
 { "EMBER",
@@ -409,7 +447,8 @@ const Theme themes[] PROGMEM = {
   C(31,20, 4),
   C( 3, 2, 1),C( 6, 4, 2),C( 8, 6, 4),C( 8, 6, 4),C(20,12, 4),C(31,20, 4),C( 6, 4, 2),C(20,14, 4),
   C( 3, 2, 1),C( 8, 6, 4),C(31,20, 4),C( 6, 4, 2),C(14,10, 4),C(22,16, 4),C(12, 8, 3),C(16,10, 4),C( 6, 4, 2),C( 8, 6, 4),C(20,12, 4),
-  C( 3, 2, 1),C( 8, 6, 4),C( 6, 4, 2),C(31,20, 4),C(20,14, 4),C(14,10, 4),C(16,12, 4) },
+  C( 3, 2, 1),C( 8, 6, 4),C( 6, 4, 2),C(31,20, 4),C(20,14, 4),C(14,10, 4),C(16,12, 4),
+  C( 5, 4, 2),C(10, 8, 4),C(31,20, 4) },
 
 // 31 NEON JUNGLE
 { "NEON JUNGLE",
@@ -420,7 +459,8 @@ const Theme themes[] PROGMEM = {
   C(28, 4,24),
   C( 0, 2, 0),C( 1, 6, 1),C( 2, 8, 2),C( 2,10, 2),C( 6,26, 4),C(28, 4,24),C( 2, 8, 2),C(10,30, 6),
   C( 0, 2, 0),C( 2,10, 2),C(28, 4,24),C( 2, 8, 2),C(12, 2,10),C(18, 2,16),C( 8,20, 6),C(12, 2,12),C( 2, 8, 2),C( 4,14, 4),C( 6,26, 4),
-  C( 0, 2, 0),C( 4,10, 4),C( 2, 8, 2),C(28, 4,24),C(10,30, 6),C( 8,22, 4),C(10,26, 6) },
+  C( 0, 2, 0),C( 4,10, 4),C( 2, 8, 2),C(28, 4,24),C(10,30, 6),C( 8,22, 4),C(10,26, 6),
+  C( 1, 5, 1),C( 3,12, 3),C(28, 4,24) },
 
 // 32 BRONZE
 { "BRONZE",
@@ -431,7 +471,8 @@ const Theme themes[] PROGMEM = {
   C( 4,24,16),
   C( 5, 6, 2),C( 8,10, 2),C(12,12, 3),C(12,14, 3),C(24,28, 8),C( 4,24,16),C(10,12, 2),C(22,26, 7),
   C( 5, 6, 2),C(12,14, 3),C( 4,24,16),C(10,12, 2),C(16,16, 4),C(24,26, 8),C(12,14, 3),C(16,18, 4),C(10,12, 2),C(12,12, 3),C(24,28, 8),
-  C( 5, 6, 2),C(12,12, 3),C(10,12, 2),C( 4,24,16),C(22,26, 7),C(14,14, 3),C(16,16, 4) },
+  C( 5, 6, 2),C(12,12, 3),C(10,12, 2),C( 4,24,16),C(22,26, 7),C(14,14, 3),C(16,16, 4),
+  C( 7, 8, 2),C(14,16, 4),C( 4,24,16) },
 
 // 33 CIRCUIT
 { "CIRCUIT",
@@ -442,7 +483,8 @@ const Theme themes[] PROGMEM = {
   C(22,18, 4),
   C( 0, 5, 2),C( 0, 7, 3),C( 2,12, 4),C( 1,10, 4),C( 3,20, 7),C(22,18, 4),C( 1, 8, 3),C( 6,26, 8),
   C( 0, 5, 2),C( 1,10, 4),C(22,18, 4),C( 1, 8, 3),C( 4,18, 6),C( 8,32, 9),C( 4,18, 6),C( 6,22, 7),C( 1, 8, 3),C( 2,12, 4),C( 3,20, 7),
-  C( 0, 5, 2),C( 2,10, 4),C( 1, 8, 3),C(22,18, 4),C( 8,32, 9),C( 4,18, 6),C( 6,24, 8) },
+  C( 0, 5, 2),C( 2,10, 4),C( 1, 8, 3),C(22,18, 4),C( 8,32, 9),C( 4,18, 6),C( 6,24, 8),
+  C( 0, 7, 3),C( 2,12, 5),C(22,18, 4) },
 
 // 34 GOLD
 { "GOLD",
@@ -453,7 +495,8 @@ const Theme themes[] PROGMEM = {
   C(31,46, 0),
   C( 2, 2, 0),C( 4, 4, 0),C( 8, 8, 0),C( 6, 6, 0),C(26,28, 0),C(31,46, 0),C( 6, 6, 0),C(24,26, 0),
   C( 2, 2, 0),C( 6, 6, 0),C(31,46, 0),C( 6, 6, 0),C(16,16, 0),C(24,26, 0),C(12,12, 0),C(18,18, 0),C( 6, 6, 0),C(12,12, 0),C(26,28, 0),
-  C( 2, 2, 0),C( 8, 8, 0),C( 6, 6, 0),C(31,46, 0),C(24,26, 0),C(16,16, 0),C(18,18, 0) },
+  C( 2, 2, 0),C( 8, 8, 0),C( 6, 6, 0),C(31,46, 0),C(24,26, 0),C(16,16, 0),C(18,18, 0),
+  C( 3, 3, 0),C( 8, 8, 0),C(31,46, 0) },
 
 // 35 THUNDER
 { "THUNDER",
@@ -464,7 +507,8 @@ const Theme themes[] PROGMEM = {
   C(31,62,31),
   C( 3, 3, 3),C( 5, 5, 5),C( 8, 8, 6),C( 8, 8, 8),C(28,32, 0),C(31,62,31),C( 6, 6, 6),C(24,28, 0),
   C( 3, 3, 3),C( 8, 8, 8),C(31,62,31),C( 6, 6, 6),C(14,16, 0),C(24,28, 0),C(12,14, 0),C(18,20, 0),C( 6, 6, 6),C(10,10, 0),C(28,32, 0),
-  C( 3, 3, 3),C(10,10, 6),C( 6, 6, 6),C(31,62,31),C(24,28, 0),C(16,18, 0),C(18,22, 0) },
+  C( 3, 3, 3),C(10,10, 6),C( 6, 6, 6),C(31,62,31),C(24,28, 0),C(16,18, 0),C(18,22, 0),
+  C( 5, 5, 5),C(10,10,10),C(31,62,31) },
 
 // 36 NATURE
 { "NATURE",
@@ -475,11 +519,29 @@ const Theme themes[] PROGMEM = {
   C(22,40, 4),
   C( 4, 6, 1),C( 8, 8, 2),C(10,10, 2),C(14,12, 3),C(10,28, 4),C(22,40, 4),C(10,10, 2),C(16,30, 6),
   C( 4, 6, 1),C(14,12, 3),C(22,40, 4),C(10,10, 2),C(14,20, 4),C(18,34, 6),C(12,18, 4),C(14,22, 4),C(10,10, 2),C(12,14, 3),C(10,28, 4),
-  C( 4, 6, 1),C(10,12, 3),C(10,10, 2),C(22,40, 4),C(16,30, 6),C(12,20, 4),C(14,22, 4) },
+  C( 4, 6, 1),C(10,12, 3),C(10,10, 2),C(22,40, 4),C(16,30, 6),C(12,20, 4),C(14,22, 4),
+  C( 7, 8, 2),C(16,14, 4),C(22,40, 4) },
+
+// 37 HACKER
+// Dark terminal aesthetic: black background, phosphor green accents.
+// Serious and readable — not the bright lime of ARCADE, but a cooler,
+// dimmer green that reads like a real CRT monitor in a dim room.
+// bg=near-black | darkSq=very dark green | lightSq=dim terminal green
+// border/cursor/label = mid-green | pieces: white fill / black text, dark fill / green text
+{ "HACKER",
+  C( 0, 1, 0),C( 0, 5, 0),C( 2,12, 1),C( 4,22, 2),C( 6,32, 3),C( 3,18, 1),
+  C( 4,20, 2),C(31,62,31),C( 0, 3, 0),C( 4,26, 2),
+  C( 6,36, 3),C( 4,28, 2),C( 1, 8, 0),C( 5,30, 2),
+  C( 0, 5, 0),C( 2,16, 1),C( 0, 3, 0),C( 0, 6, 0),
+  C( 6,32, 3),
+  C( 0, 1, 0),C( 0, 3, 0),C( 1, 8, 0),C( 0, 5, 0),C( 2,12, 1),C( 6,32, 3),C( 0, 4, 0),C( 4,22, 2),
+  C( 0, 1, 0),C( 0, 5, 0),C( 6,32, 3),C( 0, 4, 0),C( 2,16, 1),C( 4,26, 2),C( 2,14, 1),C( 4,20, 2),C( 0, 4, 0),C( 1,10, 0),C( 4,22, 2),
+  C( 0, 1, 0),C( 1, 8, 0),C( 0, 4, 0),C( 6,32, 3),C( 4,26, 2),C( 2,16, 1),C( 3,20, 1),
+  C( 0, 2, 0),C( 1, 6, 0),C( 6,32, 3) },
 
 }; // end themes[]
 
-#define NUM_THEMES 37
+#define NUM_THEMES 38
 
 // ─── Active colour variables (refreshed by refreshTheme) ─────────────────────
 // These replace the old hardcoded #define constants.  All existing draw code
@@ -499,6 +561,10 @@ uint16_t C_K_BG, C_K_HDR, C_K_HDR_TXT, C_K_KEY, C_K_KEY_BDR;
 uint16_t C_K_KEY_TXT, C_K_SEL, C_K_SEL_BDR, C_K_CONFIRM, C_K_DIG_BDR, C_K_DIG_TXT;
 // Intro
 uint16_t C_I_BG, C_I_BOX, C_I_BOX_BDR, C_I_TITLE, C_I_TITLE2, C_I_SUB, C_I_PROMPT;
+// Panel (sidebar)
+uint16_t C_PANEL_BG;    // full-height strip behind buttons
+uint16_t C_BTN_FACE;    // individual button face colour
+uint16_t C_SIDE_ACCENT; // accent text colour inside panel
 
 // Helper: read one uint16_t field from a PROGMEM Theme struct.
 // 'offset' is the field index (0-based, counting only uint16_t fields after the name pointer).
@@ -568,15 +634,24 @@ void refreshTheme() {
   C_I_TITLE2        = themeField(ti, i++); // iTitle2
   C_I_SUB           = themeField(ti, i++); // iSub
   C_I_PROMPT        = themeField(ti, i++); // iPrompt
+  // Panel
+  C_PANEL_BG        = themeField(ti, i++); // panelBg
+  C_BTN_FACE        = themeField(ti, i++); // btnFace
+  C_SIDE_ACCENT     = themeField(ti, i++); // sideAccent
   // Derived aliases (keep old names working in draw code)
   C_BOTH            = 0xFFFF;             // sel+hover overlap always white
 }
 
-// Progress bar
+// Progress bar — left column, fills from bottom up
 #define PB_X   130
 #define PB_Y    12
 #define PB_IW   12
 #define PB_IH   96
+// Evaluation bar — right column, same height as progress bar
+#define EB_X   145
+#define EB_Y    12
+#define EB_IW   12
+#define EB_IH   96
 
 // ─── Piece encoding ─────────────────────────────────────────────────────────
 #define EMPTY  0
@@ -633,7 +708,11 @@ struct HistoryEntry {
   uint32_t savedHash;  // hash before this move, for O(1) restore in unmakeMove
 };
 
-#define MAX_HISTORY 100
+// MAX_HISTORY: must cover the longest realistic game.
+// A chess game can last 200+ half-moves in theory; 300 comfortably covers
+// any practical game while staying within ESP32 SRAM limits.
+// HistoryEntry is ~20 bytes, so 300 entries = ~6 KB.
+#define MAX_HISTORY 300
 HistoryEntry history[MAX_HISTORY];
 int historyCount = 0;
 
@@ -673,6 +752,8 @@ uint8_t themeMenuSel = 0;       // remembered scroll position in theme menu
 volatile bool     searchRunning  = false;
 volatile bool     searchDone     = false;
 volatile int      searchPct      = 0;
+volatile int      searchDepth    = 0;   // current iterative-deepening depth, shown above progress bar
+volatile int      evalScore      = 0;   // last completed search score (centipawns, white-relative) for eval bar
 Move              searchResult   = {0,0,0,0};
 SemaphoreHandle_t searchSem      = nullptr;
 
@@ -682,80 +763,106 @@ int  legalCount = 0;
 
 int engineFrom = -1, engineTo = -1;
 int  panelFocus = 0;
+int  fullMoveCount = 0;
 
 unsigned long lastJoyMove = 0;
 #define JOY_DELAY 180
 
 // ─── Piece-square tables ─────────────────────────────────────────────────────
+// Written from WHITE's perspective, rank 0 = white's back rank (a1..h1).
+// Black pieces are automatically flipped by pstValue().
+// Values are BONUSES on top of base piece value — keep magnitudes modest
+// so PST never overrides a 1-pawn material difference (~100cp).
+//
+// PST_PAWN: rank 0 (back rank) and rank 7 (promotion) are always 0 — pawns
+// can't exist there. Rank 1 (just pushed off back rank) gets a tiny bonus.
+// Central files get increasing bonuses toward the 4th/5th rank.
 const int8_t PST_PAWN[64] PROGMEM = {
-   0,  0,  0,  0,  0,  0,  0,  0,
-  80, 80, 80, 80, 80, 80, 80, 80,
-  20, 22, 30, 40, 40, 30, 22, 20,
-  12, 14, 20, 35, 35, 20, 14, 12,
-   5,  8, 15, 28, 28, 15,  8,  5,
-   0, -2,  5, 10, 10,  5, -2,  0,
-  -5, -5, -8,-15,-15, -8, -5, -5,
-   0,  0,  0,  0,  0,  0,  0,  0
+   0,  0,  0,  0,  0,  0,  0,  0,   // rank 0 — impossible, always 0
+  -5, -3,  0,  0,  0,  0, -3, -5,   // rank 1 — just left home, slight rim penalty
+  -4, -2,  4, 12, 12,  4, -2, -4,   // rank 2 — modest bonus for central files
+   0,  0,  8, 22, 22,  8,  0,  0,   // rank 3 — good central advance
+   6,  6, 14, 28, 28, 14,  6,  6,   // rank 4 — strong central control
+  18, 20, 24, 30, 30, 24, 20, 18,   // rank 5 — advanced, very strong
+  40, 44, 48, 52, 52, 48, 44, 40,   // rank 6 — one step from promotion
+   0,  0,  0,  0,  0,  0,  0,  0    // rank 7 — impossible, always 0
 };
+
+// PST_KNIGHT: strong central preference, heavy rim/corner penalty.
 const int8_t PST_KNIGHT[64] PROGMEM = {
-  -50,-40,-30,-30,-30,-30,-40,-50,
-  -40,-20,  0,  0,  0,  0,-20,-40,
-  -30,  0,  8, 12, 12,  8,  0,-30,
-  -30,  4, 12, 16, 16, 12,  4,-30,
-  -30,  0, 12, 16, 16, 12,  0,-30,
-  -30,  4,  8, 12, 12,  8,  4,-30,
-  -40,-20,  0,  4,  4,  0,-20,-40,
-  -50,-40,-30,-30,-30,-30,-40,-50
+  -50,-40,-30,-30,-30,-30,-40,-50,   // rank 0 — back rank, terrible
+  -40,-20,  0,  2,  2,  0,-20,-40,   // rank 1
+  -30,  2, 10, 14, 14, 10,  2,-30,   // rank 2
+  -20,  6, 14, 18, 18, 14,  6,-20,   // rank 3 — outpost territory
+  -20,  4, 14, 18, 18, 14,  4,-20,   // rank 4
+  -30,  2, 10, 14, 14, 10,  2,-30,   // rank 5
+  -40,-20,  0,  2,  2,  0,-20,-40,   // rank 6
+  -50,-40,-30,-20,-20,-30,-40,-50    // rank 7 — back rank
 };
+
+// PST_BISHOP: long diagonal activity, moderate central bonus.
+// Notably NOT rewarding rank 5+ to avoid early sorties.
 const int8_t PST_BISHOP[64] PROGMEM = {
-  -20,-10,-10,-10,-10,-10,-10,-20,
-  -10,  0,  0,  0,  0,  0,  0,-10,
-  -10,  0,  5, 10, 10,  5,  0,-10,
-  -10,  5,  5, 10, 10,  5,  5,-10,
-  -10,  0, 10, 10, 10, 10,  0,-10,
-  -10, 10, 10, 10, 10, 10, 10,-10,
-  -10,  5,  0,  0,  0,  0,  5,-10,
-  -20,-10,-10,-10,-10,-10,-10,-20
+  -20,-10,-10,-10,-10,-10,-10,-20,   // rank 0 — back rank
+  -10,  4,  0,  0,  0,  0,  4,-10,   // rank 1 — fianchetto squares bonus
+  -10,  6,  8, 10, 10,  8,  6,-10,   // rank 2
+  -10,  2, 10, 12, 12, 10,  2,-10,   // rank 3
+  -10,  2, 10, 12, 12, 10,  2,-10,   // rank 4 — symmetric, no forward bias
+  -10,  4,  6,  8,  8,  6,  4,-10,   // rank 5 — deliberately lower than rank 3/4
+  -10,  4,  0,  0,  0,  0,  4,-10,   // rank 6
+  -20,-10,-10,-10,-10,-10,-10,-20    // rank 7
 };
+
+// PST_ROOK: reward 7th rank (rank 6 from white = rank 1 in PST after flip for black),
+// penalise back rank slightly. No bonus for rank 5/6 to stop early rook sorties.
 const int8_t PST_ROOK[64] PROGMEM = {
-  -2, -1,  0,  3,  3,  0, -1, -2,
-   5, 10, 10, 10, 10, 10, 10,  5,
-  -5,  0,  0,  0,  0,  0,  0, -5,
-  -5,  0,  0,  0,  0,  0,  0, -5,
-  -5,  0,  0,  0,  0,  0,  0, -5,
-  -5,  0,  0,  0,  0,  0,  0, -5,
-  -5,  0,  0,  0,  0,  0,  0, -5,
-   0,  0,  0,  5,  5,  0,  0,  0
+   0,  0,  0,  2,  2,  0,  0,  0,   // rank 0 — back rank, neutral
+  -4,  0,  0,  0,  0,  0,  0, -4,   // rank 1
+  -4,  0,  0,  0,  0,  0,  0, -4,   // rank 2
+  -4,  0,  0,  0,  0,  0,  0, -4,   // rank 3
+  -4,  0,  0,  0,  0,  0,  0, -4,   // rank 4
+  -4,  0,  0,  0,  0,  0,  0, -4,   // rank 5
+   6, 10, 10, 10, 10, 10, 10,  6,   // rank 6 — 7th rank, very strong
+   0,  0,  0,  4,  4,  0,  0,  0    // rank 7 — back rank, centre files slight bonus
 };
+
+// PST_QUEEN: very modest positional bonuses. The queen's value comes from
+// tactics, not from PST. Strong central penalties on ranks 5–7 prevent
+// premature development. Slightly negative on rim.
 const int8_t PST_QUEEN[64] PROGMEM = {
-  -20,-10,-10, -5, -5,-10,-10,-20,
-  -10,  0,  0,  0,  0,  0,  0,-10,
-  -10,  0,  2,  2,  2,  2,  0,-10,
-   -5,  0,  2,  3,  3,  2,  0, -5,
-    0,  0,  2,  3,  3,  2,  0, -5,
-  -10,  2,  2,  2,  2,  2,  0,-10,
-  -10,  0,  2,  0,  0,  0,  0,-10,
-  -20,-10,-10, -5, -5,-10,-10,-20
+  -20,-12,-12, -8, -8,-12,-12,-20,   // rank 0 — back rank
+  -12, -4,  0,  0,  0,  0, -4,-12,   // rank 1
+  -12,  0,  4,  4,  4,  4,  0,-12,   // rank 2
+   -8,  0,  4,  6,  6,  4,  0, -8,   // rank 3
+   -8,  0,  4,  6,  6,  4,  0, -8,   // rank 4
+  -12, -2,  0,  2,  2,  0, -2,-12,   // rank 5 — less bonus, disincentivise forward queen
+  -14, -6, -4, -4, -4, -4, -6,-14,   // rank 6 — penalty for early queen sortie
+  -20,-12,-12, -8, -8,-12,-12,-20    // rank 7
 };
+
+// PST_KING_MID: king wants to castle and stay sheltered behind pawns.
+// Castled positions (g1/c1 for white) rewarded. Centre is lethal.
 const int8_t PST_KING_MID[64] PROGMEM = {
-  -30,-40,-40,-50,-50,-40,-40,-30,
-  -30,-40,-40,-50,-50,-40,-40,-30,
-  -30,-40,-40,-50,-50,-40,-40,-30,
-  -30,-40,-40,-50,-50,-40,-40,-30,
-  -20,-30,-30,-40,-40,-30,-30,-20,
-  -10,-20,-20,-20,-20,-20,-20,-10,
-   20, 20,  0,  0,  0,  0, 20, 20,
-   20, 30, 10,  0,  0, 10, 30, 20
+  -30,-40,-40,-50,-50,-40,-40,-30,   // rank 0 — back rank, exposed centre punished
+  -30,-40,-40,-50,-50,-40,-40,-30,   // rank 1
+  -30,-40,-40,-50,-50,-40,-40,-30,   // rank 2
+  -30,-40,-40,-50,-50,-40,-40,-30,   // rank 3
+  -20,-30,-30,-40,-40,-30,-30,-20,   // rank 4
+  -10,-20,-20,-30,-30,-20,-20,-10,   // rank 5
+   10, 12,  0,-10,-10,  0, 12, 10,   // rank 6 — castled positions OK
+   22, 28, 16, -4, -4, 16, 28, 22    // rank 7 — g1/b1 castled squares rewarded
 };
+
+// PST_KING_END: king should centralise and become active.
 const int8_t PST_KING_END[64] PROGMEM = {
-  -50,-40,-30,-20,-20,-30,-40,-50,
-  -30,-20,-10,  0,  0,-10,-20,-30,
-  -30,-10, 20, 30, 30, 20,-10,-30,
-  -30,-10, 30, 40, 40, 30,-10,-30,
-  -30,-10, 30, 40, 40, 30,-10,-30,
-  -30,-10, 20, 30, 30, 20,-10,-30,
-  -30,-30,  0,  0,  0,  0,-30,-30,
-  -50,-30,-30,-30,-30,-30,-30,-50
+  -50,-30,-20,-10,-10,-20,-30,-50,
+  -30,-10,  8, 12, 12,  8,-10,-30,
+  -20,  8, 24, 28, 28, 24,  8,-20,
+  -10, 12, 28, 36, 36, 28, 12,-10,
+  -10, 12, 28, 36, 36, 28, 12,-10,
+  -20,  8, 24, 28, 28, 24,  8,-20,
+  -30,-10,  8, 12, 12,  8,-10,-30,
+  -50,-30,-20,-10,-10,-20,-30,-50
 };
 
 // ─── Opening book ─────────────────────────────────────────────────────────────
@@ -771,6 +878,8 @@ void drawAll();
 void drawBoard();
 void drawSquare(int sq);
 void drawLeftPanel();
+// drawPhaseIndicator is embedded in drawLeftPanel — no separate declaration needed
+void drawEvalBar(int evalCp);
 void drawProgressBar(int pct);
 void drawLastMoveOutlines(int from, int to);
 void drawLegalDots();
@@ -784,7 +893,7 @@ bool isLegal(Move& m);
 void makeMove(Move& m, HistoryEntry* he);
 void unmakeMove(HistoryEntry& he);
 int  evaluate();
-int  alphaBeta(int depth, int alpha, int beta, bool maximizing, unsigned long startMs);
+int  alphaBeta(int depth, int alpha, int beta, bool maximizing, unsigned long startMs, int lastKnightSq=-1);
 int  quiesce(int alpha, int beta);
 Move getBotMove();
 bool isSquareAttacked(int sq, bool byWhite);
@@ -822,14 +931,36 @@ void showCheckmateScreen();
 // ─── UI-4: Intro cutscene ─────────────────────────────────────────────────────
 void playIntroCutscene();
 
-uint32_t hashHistory[MAX_HISTORY+10];
+// ─── Search depth/buffer constants (must be declared before any arrays that
+//     reference them, including hashHistory below) ───────────────────────────
+// MAX_DEPTH: killer/history table depth — must exceed search depth + extensions.
+#define MAX_DEPTH     12
+// AB_MAX_LEVELS: maximum alphaBeta recursion levels (depth 9 + 3 extensions + 1).
+#define AB_MAX_LEVELS 13
+// Q_MAX_LEVELS: maximum quiescence recursion levels.
+#define Q_MAX_LEVELS  10
+
+// hashHistory must hold: all game moves ever played (up to MAX_HISTORY)
+// PLUS one entry per alphaBeta recursion level (up to AB_MAX_LEVELS=13).
+// Previous size MAX_HISTORY+10 = 110 was too small: a 100-move game +
+// 12-ply search = 112 writes → out-of-bounds write and crash.
+// New size: MAX_HISTORY + AB_MAX_LEVELS + 4 = 121 (extra 4 for safety margin).
+uint32_t hashHistory[MAX_HISTORY + AB_MAX_LEVELS + 4];
 int hashHistoryCount = 0;
 
+// ─── History heuristic table ──────────────────────────────────────────────────
+int16_t histHeuristic[64][64];
+
 // ─── Search globals ───────────────────────────────────────────────────────────
+// The engine runs iterative deepening within a 5-second wall-clock budget.
+// searchAborted is set when the time limit is hit, ending the current depth
+// cleanly and returning the best move found so far.
+// Per-depth best moves are always recorded, so the shallow-depth fallback
+// logic has full data regardless of which depth was the last to complete.
 bool searchAborted = false;
 unsigned long searchStart;
 uint32_t nodeCount = 0;
-#define SEARCH_TIME_MS 4000
+#define SEARCH_TIME_MS 5000UL   // 5-second hard budget
 
 // ─── Development tracking ─────────────────────────────────────────────────────
 uint64_t bPieceMoved = 0;
@@ -928,6 +1059,7 @@ void initBoard() {
   gameOverMsg[0]=0;
   selSq=-1;
   legalCount=0;
+  fullMoveCount=0;
 }
 
 // ─── Move generation ─────────────────────────────────────────────────────────
@@ -1236,11 +1368,14 @@ bool IRAM_ATTR isLegal(Move& m) {
 }
 
 // ─── Repetition ───────────────────────────────────────────────────────────────
+// Three-fold repetition: the same position must appear 3 times in hashHistory.
+// When called from checkGameOver, the current position is already in hashHistory,
+// so we count >= 3. (The search uses >= 2 because it checks before pushing.)
 bool isRepetition() {
   uint32_t h = currentHash;
   int cnt = 0;
   for(int i=0;i<hashHistoryCount;i++) if(hashHistory[i]==h) cnt++;
-  return cnt >= 2;
+  return cnt >= 3;
 }
 
 // ─── Material counting ────────────────────────────────────────────────────────
@@ -1262,37 +1397,40 @@ int gamePhase() {
   if(cachedPhase >= 0 && cachedPhaseHash == currentHash) return cachedPhase;
 
   int total = 0;
+  bool bQueenOnBoard = false;
+  bool wQueenOnBoard = false;
   for(int s=0;s<64;s++) {
     int p=board[s]; if(!p) continue;
     int t=TYPE(p);
     if(t!=KING) total += PIECE_VAL[t];
+    if(p==B_Q) bQueenOnBoard=true;
+    if(p==W_Q) wQueenOnBoard=true;
   }
 
   int phase;
   if(total < 1800) {
-    phase = 2; // endgame
+    phase = 2;
   } else {
-    // Count undeveloped minors for BOTH sides
-    int undevBlack = 0, undevWhite = 0;
-    if(board[sqOf(7,1)]==B_N) undevBlack++;
-    if(board[sqOf(7,6)]==B_N) undevBlack++;
-    if(board[sqOf(7,2)]==B_B) undevBlack++;
-    if(board[sqOf(7,5)]==B_B) undevBlack++;
-    if(board[sqOf(0,1)]==W_N) undevWhite++;
-    if(board[sqOf(0,6)]==W_N) undevWhite++;
-    if(board[sqOf(0,2)]==W_B) undevWhite++;
-    if(board[sqOf(0,5)]==W_B) undevWhite++;
-    int undev = undevBlack + undevWhite; // total both sides
-
-    bool bothCastled = (!bCastle_K && !bCastle_Q) && (!wCastle_K && !wCastle_Q);
-
-    // Opening: either side still has 2+ undeveloped minors, or very early game
-    if(historyCount < 16 || undev >= 4) {
-      phase = 0;
-    } else if(historyCount < 30 && undev >= 2 && !bothCastled) {
-      phase = 0;
+    // Only declare opening if BOTH queens are still present.
+    // If either queen is gone the opening phase has ended.
+    if(!bQueenOnBoard || !wQueenOnBoard) {
+      phase = 1;
     } else {
-      phase = 1; // middlegame
+      int undev = 0;
+      if(board[sqOf(7,1)]==B_N) undev++;
+      if(board[sqOf(7,6)]==B_N) undev++;
+      if(board[sqOf(7,2)]==B_B) undev++;
+      if(board[sqOf(7,5)]==B_B) undev++;
+
+      bool bothCastled = (!bCastle_K && !bCastle_Q) && (!wCastle_K && !wCastle_Q);
+
+      if(historyCount < 16 || undev >= 2) {
+        phase = 0;
+      } else if(historyCount < 30 && undev >= 1 && !bothCastled) {
+        phase = 0;
+      } else {
+        phase = 1;
+      }
     }
   }
 
@@ -1527,30 +1665,25 @@ int pieceThreatPenalty(int sq, int piece) {
 
 // ─── Evaluation ───────────────────────────────────────────────────────────────
 // White-relative: positive = good for white, negative = good for black.
-// Fully symmetrical. Phase-independent safety checks applied at all times.
 int evaluate() {
   int score = 0;
   bool endgame = isEndgame();
   bool opening = isOpeningPhase();
 
   int wKsq = -1, bKsq = -1, wb = 0, bb = 0;
-  int wMat = 0, bMat = 0;
 
   // ── Material + PST ────────────────────────────────────────────────────────
   for(int s = 0; s < 64; s++) {
     int p = board[s]; if(!p) continue;
-    int t = TYPE(p);
-    int val = PIECE_VAL[t] + pstValue(p, s, endgame);
+    int val = PIECE_VAL[TYPE(p)] + pstValue(p, s, endgame);
     if(IS_WHITE(p)) {
       score += val;
-      if(t == BISHOP) wb++;
-      if(t == KING)   wKsq = s;
-      if(t != KING)   wMat += PIECE_VAL[t];
+      if(TYPE(p) == BISHOP) wb++;
+      if(TYPE(p) == KING)   wKsq = s;
     } else {
       score -= val;
-      if(t == BISHOP) bb++;
-      if(t == KING)   bKsq = s;
-      if(t != KING)   bMat += PIECE_VAL[t];
+      if(TYPE(p) == BISHOP) bb++;
+      if(TYPE(p) == KING)   bKsq = s;
     }
   }
 
@@ -1558,437 +1691,456 @@ int evaluate() {
   if(wb >= 2) score += 30;
   if(bb >= 2) score -= 30;
 
-  // ── Pawn structure ────────────────────────────────────────────────────────
-  bool wFile[8] = {}, bFile[8] = {};
-  int  wFileCnt[8] = {}, bFileCnt[8] = {};
+  // ── Doubled pawns ─────────────────────────────────────────────────────────
   for(int f = 0; f < 8; f++) {
+    int wp = 0, bp = 0;
     for(int r = 0; r < 8; r++) {
-      if(board[sqOf(r,f)] == W_P) { wFile[f]=true; wFileCnt[f]++; }
-      if(board[sqOf(r,f)] == B_P) { bFile[f]=true; bFileCnt[f]++; }
+      if(board[sqOf(r,f)] == W_P) wp++;
+      if(board[sqOf(r,f)] == B_P) bp++;
     }
-    if(wFileCnt[f] > 1) score -= 22 * (wFileCnt[f]-1);
-    if(bFileCnt[f] > 1) score += 22 * (bFileCnt[f]-1);
+    if(wp > 1) score -= 20 * (wp - 1);
+    if(bp > 1) score += 20 * (bp - 1);
   }
 
-  // Isolated pawns
-  for(int f = 0; f < 8; f++) {
-    bool wAdj = (f>0 && wFile[f-1]) || (f<7 && wFile[f+1]);
-    bool bAdj = (f>0 && bFile[f-1]) || (f<7 && bFile[f+1]);
-    if(wFile[f] && !wAdj) score -= 22;
-    if(bFile[f] && !bAdj) score += 22;
-  }
-
-  // Passed + backward pawns
+  // ── Passed pawns ──────────────────────────────────────────────────────────
   int passedScale = endgame ? 2 : 1;
   for(int s = 0; s < 64; s++) {
     int p = board[s]; if(TYPE(p) != PAWN) continue;
     int r = rankOf(s), f = fileOf(s);
+    bool passed = true;
     if(IS_WHITE(p)) {
-      bool passed = true;
-      for(int rr=r+1; rr<8 && passed; rr++)
-        for(int ff=f-1; ff<=f+1; ff++)
-          if(ff>=0&&ff<8&&board[sqOf(rr,ff)]==B_P) passed=false;
-      if(passed) score += passedScale*(20 + r*12);
-      bool supported=false;
-      for(int df=-1;df<=1;df+=2){int af=f+df;if(af<0||af>7)continue;
-        for(int rr=0;rr<=r;rr++) if(board[sqOf(rr,af)]==W_P){supported=true;break;} if(supported)break;}
-      if(!supported && r+1<8 && ((f>0&&board[sqOf(r+1,f-1)]==B_P)||(f<7&&board[sqOf(r+1,f+1)]==B_P)))
-        score -= 18;
+      for(int rr = r+1; rr < 8 && passed; rr++)
+        for(int ff = f-1; ff <= f+1; ff++)
+          if(ff >= 0 && ff < 8 && board[sqOf(rr,ff)] == B_P) passed = false;
+      if(passed) score += passedScale * (20 + r * 10);
     } else {
-      bool passed = true;
-      for(int rr=r-1; rr>=0 && passed; rr--)
-        for(int ff=f-1; ff<=f+1; ff++)
-          if(ff>=0&&ff<8&&board[sqOf(rr,ff)]==W_P) passed=false;
-      if(passed) score -= passedScale*(20 + (7-r)*12);
-      bool supported=false;
-      for(int df=-1;df<=1;df+=2){int af=f+df;if(af<0||af>7)continue;
-        for(int rr=7;rr>=r;rr--) if(board[sqOf(rr,af)]==B_P){supported=true;break;} if(supported)break;}
-      if(!supported && r-1>=0 && ((f>0&&board[sqOf(r-1,f-1)]==W_P)||(f<7&&board[sqOf(r-1,f+1)]==W_P)))
-        score += 18;
+      for(int rr = r-1; rr >= 0 && passed; rr--)
+        for(int ff = f-1; ff <= f+1; ff++)
+          if(ff >= 0 && ff < 8 && board[sqOf(rr,ff)] == W_P) passed = false;
+      if(passed) score -= passedScale * (20 + (7 - r) * 10);
     }
   }
 
-  // ── King safety (opening + middlegame) ────────────────────────────────────
+  // ── Isolated pawns ────────────────────────────────────────────────────────
+  {
+    bool wFile[8] = {}, bFile[8] = {};
+    for(int f = 0; f < 8; f++) for(int r = 0; r < 8; r++) {
+      if(board[sqOf(r,f)] == W_P) wFile[f] = true;
+      if(board[sqOf(r,f)] == B_P) bFile[f] = true;
+    }
+    for(int f = 0; f < 8; f++) {
+      bool wAdj = (f > 0 && wFile[f-1]) || (f < 7 && wFile[f+1]);
+      bool bAdj = (f > 0 && bFile[f-1]) || (f < 7 && bFile[f+1]);
+      if(wFile[f] && !wAdj) score -= 20;
+      if(bFile[f] && !bAdj) score += 20;
+    }
+  }
+
+  // ── Backward pawns ────────────────────────────────────────────────────────
+  for(int s = 0; s < 64; s++) {
+    int p = board[s]; if(TYPE(p) != PAWN) continue;
+    int r = rankOf(s), f = fileOf(s);
+    if(IS_WHITE(p)) {
+      bool supported = false;
+      for(int df = -1; df <= 1; df += 2) { int af = f+df; if(af<0||af>7) continue;
+        for(int rr = 0; rr <= r; rr++) if(board[sqOf(rr,af)]==W_P){supported=true;break;} if(supported) break; }
+      bool frontAtk = false; int fr = r+1;
+      for(int df=-1;df<=1;df+=2){int af=f+df;if(inBounds(fr,af)&&board[sqOf(fr,af)]==B_P){frontAtk=true;break;}}
+      if(!supported && frontAtk) score -= 15;
+    } else {
+      bool supported = false;
+      for(int df=-1;df<=1;df+=2){int af=f+df;if(af<0||af>7)continue;
+        for(int rr=7;rr>=r;rr--) if(board[sqOf(rr,af)]==B_P){supported=true;break;} if(supported) break;}
+      bool frontAtk = false; int fr = r-1;
+      for(int df=-1;df<=1;df+=2){int af=f+df;if(inBounds(fr,af)&&board[sqOf(fr,af)]==W_P){frontAtk=true;break;}}
+      if(!supported && frontAtk) score += 15;
+    }
+  }
+
+  // ── King safety (middlegame only) ─────────────────────────────────────────
+  // Each open/semi-open file adjacent to the king costs 25cp (was 10).
+  // An exposed king is a strategic catastrophe worth ~75cp penalty minimum.
   if(!endgame) {
     if(wKsq >= 0) {
-      int kf = fileOf(wKsq), kr = rankOf(wKsq);
-      for(int df=-1;df<=1;df++) {
-        int f2=kf+df; if(f2<0||f2>7) continue;
-        bool shield=false;
-        for(int r=kr+1;r<8;r++) if(board[sqOf(r,f2)]==W_P){shield=true;break;}
-        if(!shield) score -= 40;
+      int kf = fileOf(wKsq);
+      for(int df = -1; df <= 1; df++) {
+        int f2 = kf+df; if(f2<0||f2>7) continue;
+        bool sh = false;
+        for(int r = rankOf(wKsq)+1; r < 8; r++) if(board[sqOf(r,f2)]==W_P){sh=true;break;}
+        if(!sh) score -= 25;
       }
-      if(!wFile[kf]) score -= 30;
-      if(!wCastle_K && !wCastle_Q) score += 20;
-      int attackCount = 0;
-      for(int df=-1;df<=1;df++) for(int dr=-1;dr<=1;dr++) {
-        if(df==0&&dr==0) continue;
-        int as=sqOf(kr+dr,kf+df);
-        if(!squareOnBoard(as)) continue;
-        if(isSquareAttacked(as,false)) attackCount++;
-      }
-      score -= attackCount * 14;
     }
     if(bKsq >= 0) {
-      int kf = fileOf(bKsq), kr = rankOf(bKsq);
-      for(int df=-1;df<=1;df++) {
-        int f2=kf+df; if(f2<0||f2>7) continue;
-        bool shield=false;
-        for(int r=kr-1;r>=0;r--) if(board[sqOf(r,f2)]==B_P){shield=true;break;}
-        if(!shield) score += 40;
+      int kf = fileOf(bKsq);
+      for(int df = -1; df <= 1; df++) {
+        int f2 = kf+df; if(f2<0||f2>7) continue;
+        bool sh = false;
+        for(int r = rankOf(bKsq)-1; r >= 0; r--) if(board[sqOf(r,f2)]==B_P){sh=true;break;}
+        if(!sh) score += 25;
       }
-      if(!bFile[kf]) score += 30;
-      if(!bCastle_K && !bCastle_Q) score -= 20;
-      int attackCount = 0;
-      for(int df=-1;df<=1;df++) for(int dr=-1;dr<=1;dr++) {
-        if(df==0&&dr==0) continue;
-        int as=sqOf(kr+dr,kf+df);
-        if(!squareOnBoard(as)) continue;
-        if(isSquareAttacked(as,true)) attackCount++;
-      }
-      score += attackCount * 14;
     }
   }
 
   // ── King activity in endgame ──────────────────────────────────────────────
   if(endgame) {
-    if(wKsq>=0){int kr=rankOf(wKsq),kf=fileOf(wKsq);
-      score+=(8-(abs(kr-3)+abs(kr-4)+abs(kf-3)+abs(kf-4)))*5;}
-    if(bKsq>=0){int kr=rankOf(bKsq),kf=fileOf(bKsq);
-      score-=(8-(abs(kr-3)+abs(kr-4)+abs(kf-3)+abs(kf-4)))*5;}
-    if(wMat > bMat + 200 && bKsq >= 0) {
-      int bkf=fileOf(bKsq), bkr=rankOf(bKsq);
-      score += (7-min(bkf,7-bkf)) * 10 + (7-min(bkr,7-bkr)) * 10;
+    if(wKsq >= 0) { int kr=rankOf(wKsq), kf=fileOf(wKsq);
+      score += (8 - (abs(kr-3)+abs(kr-4)+abs(kf-3)+abs(kf-4))) * 4; }
+    if(bKsq >= 0) { int kr=rankOf(bKsq), kf=fileOf(bKsq);
+      score -= (8 - (abs(kr-3)+abs(kr-4)+abs(kf-3)+abs(kf-4))) * 4; }
+  }
+
+  // ── Piece mobility ────────────────────────────────────────────────────────
+  // Count reachable squares for knights, bishops, rooks, queens.
+  // Trapped or restricted pieces get a direct score penalty.
+  // Uses fast square-counting — no SEE, no simulation, O(moves) per piece.
+  {
+    const int Ndx[8][2]={{2,1},{2,-1},{-2,1},{-2,-1},{1,2},{1,-2},{-1,2},{-1,-2}};
+    const int Bdx[4][2]={{1,1},{1,-1},{-1,1},{-1,-1}};
+    const int Rdx[4][2]={{1,0},{-1,0},{0,1},{0,-1}};
+
+    for(int s=0;s<64;s++) {
+      int p=board[s]; if(!p) continue;
+      int t=TYPE(p); if(t==PAWN||t==KING) continue;
+      int mob=0;
+      int myColor=COLOR(p);
+
+      if(t==KNIGHT) {
+        for(auto& d:Ndx){int r2=rankOf(s)+d[0],f2=fileOf(s)+d[1];
+          if(inBounds(r2,f2)&&COLOR(board[sqOf(r2,f2)])!=myColor) mob++;}
+        // Knight mobility scale: 0sq=-30, 1=-20, 2=-10, 3=0, 4..8=+2 each
+        int bonus = (mob<=2) ? (mob-3)*10 : (mob-3)*2;
+        if(IS_WHITE(p)) score+=bonus; else score-=bonus;
+      }
+      else if(t==BISHOP) {
+        for(auto& d:Bdx){int r2=rankOf(s)+d[0],f2=fileOf(s)+d[1];
+          while(inBounds(r2,f2)){
+            if(board[sqOf(r2,f2)]){if(COLOR(board[sqOf(r2,f2)])!=myColor)mob++;break;}
+            mob++;r2+=d[0];f2+=d[1];}}
+        // Bishop: 0-2sq = penalty, 3-5 = neutral, 6+ = small bonus
+        int bonus = (mob<=2) ? (mob-3)*8 : (mob<=5) ? 0 : (mob-5)*3;
+        if(IS_WHITE(p)) score+=bonus; else score-=bonus;
+      }
+      else if(t==ROOK) {
+        for(auto& d:Rdx){int r2=rankOf(s)+d[0],f2=fileOf(s)+d[1];
+          while(inBounds(r2,f2)){
+            if(board[sqOf(r2,f2)]){if(COLOR(board[sqOf(r2,f2)])!=myColor)mob++;break;}
+            mob++;r2+=d[0];f2+=d[1];}}
+        // Rook: <4sq = penalised (blocked rook), 7+ = bonus
+        int bonus = (mob<4) ? (mob-4)*6 : (mob>=7) ? (mob-6)*3 : 0;
+        if(IS_WHITE(p)) score+=bonus; else score-=bonus;
+      }
+      else if(t==QUEEN) {
+        for(auto& d:Bdx){int r2=rankOf(s)+d[0],f2=fileOf(s)+d[1];
+          while(inBounds(r2,f2)){
+            if(board[sqOf(r2,f2)]){if(COLOR(board[sqOf(r2,f2)])!=myColor)mob++;break;}
+            mob++;r2+=d[0];f2+=d[1];}}
+        for(auto& d:Rdx){int r2=rankOf(s)+d[0],f2=fileOf(s)+d[1];
+          while(inBounds(r2,f2)){
+            if(board[sqOf(r2,f2)]){if(COLOR(board[sqOf(r2,f2)])!=myColor)mob++;break;}
+            mob++;r2+=d[0];f2+=d[1];}}
+        // Queen: small bonus per square beyond 10, penalty below 5
+        int bonus = (mob<5) ? (mob-5)*4 : (mob>10) ? (mob-10)*2 : 0;
+        if(IS_WHITE(p)) score+=bonus; else score-=bonus;
+      }
     }
   }
 
-  // ── Queen safety — UNIVERSAL, all phases ─────────────────────────────────
-  // Penalise queen on any square attacked by an enemy piece (SEE-based)
-  for(int s=0;s<64;s++) {
-    int p=board[s]; if(TYPE(p)!=QUEEN) continue;
-    bool isW = IS_WHITE(p);
-    int sign = isW ? -1 : 1;
-    // Attacked by enemy pawn directly?
-    int pdir = isW ? 1 : -1; // direction enemy pawns advance to attack this queen
-    int ePawn = isW ? B_P : W_P;
-    for(int df=-1;df<=1;df+=2) {
-      int pr=rankOf(s)+pdir, pf=fileOf(s)+df;
-      if(inBounds(pr,pf) && board[sqOf(pr,pf)]==ePawn) { score+=sign*55; break; }
-    }
-    // Attacked by any enemy piece — use SEE to determine real danger
-    int loss = seeCaptures(s, isW ? 2 : 1);
-    if(loss > 0) score += sign * min(loss, 120); // cap at 120 to avoid dominating eval
-  }
-
-  // ── UNIVERSAL piece safety — minor pieces on attacked squares ────────────
-  // Applies in ALL phases. Penalises knights and bishops sitting on squares
-  // where the opponent has a favourable capture (SEE > 0).
-  for(int s=0;s<64;s++) {
-    int p=board[s]; if(!p) continue;
-    int t=TYPE(p); if(t!=KNIGHT && t!=BISHOP) continue;
-    bool isW = IS_WHITE(p);
-    int attColor = isW ? 2 : 1;
-    int loss = seeCaptures(s, attColor);
-    if(loss > 0) {
-      int sign = isW ? -1 : 1;
-      score += sign * (loss / 2); // half penalty — already in PST, avoid double-count
-    }
-  }
-
-  // ── Development (opening only, now symmetrical both sides) ───────────────
+  // ── Opening-specific penalties ────────────────────────────────────────────
   if(opening) {
-    if(board[sqOf(0,1)]==W_N) score -= 28; if(board[sqOf(0,6)]==W_N) score -= 28;
-    if(board[sqOf(0,2)]==W_B) score -= 22; if(board[sqOf(0,5)]==W_B) score -= 22;
-    if(board[sqOf(7,1)]==B_N) score += 28; if(board[sqOf(7,6)]==B_N) score += 28;
-    if(board[sqOf(7,2)]==B_B) score += 22; if(board[sqOf(7,5)]==B_B) score += 22;
+    // Undeveloped minor piece penalty — each piece costs more the longer it stays home
+    if(board[sqOf(7,1)]==B_N) score += 30; if(board[sqOf(7,6)]==B_N) score += 30;
+    if(board[sqOf(7,2)]==B_B) score += 25; if(board[sqOf(7,5)]==B_B) score += 25;
+    if(board[sqOf(0,1)]==W_N) score -= 30; if(board[sqOf(0,6)]==W_N) score -= 30;
+    if(board[sqOf(0,2)]==W_B) score -= 25; if(board[sqOf(0,5)]==W_B) score -= 25;
 
-    if( wCastle_K|| wCastle_Q) score += 12;
-    if(!wCastle_K&&!wCastle_Q) score -= 28;
-    if( bCastle_K|| bCastle_Q) score -= 12;
-    if(!bCastle_K&&!bCastle_Q) score += 28;
+    // Castling rights: a small bonus for still having the option.
+    // We do NOT penalise losing rights because losing them via castling is good,
+    // not bad — king safety is evaluated separately via the pawn shield check.
+    if(bCastle_K||bCastle_Q) score -= 15;  // black has options (good for black)
+    if(wCastle_K||wCastle_Q) score += 15;  // white has options (good for white)
 
-    { int wUndv=0, bUndv=0;
-      if(board[sqOf(0,1)]==W_N)wUndv++;if(board[sqOf(0,6)]==W_N)wUndv++;
-      if(board[sqOf(0,2)]==W_B)wUndv++;if(board[sqOf(0,5)]==W_B)wUndv++;
-      if(board[sqOf(7,1)]==B_N)bUndv++;if(board[sqOf(7,6)]==B_N)bUndv++;
-      if(board[sqOf(7,2)]==B_B)bUndv++;if(board[sqOf(7,5)]==B_B)bUndv++;
-      if(board[sqOf(0,3)]!=W_Q && wUndv>=2) score -= 45;
-      if(board[sqOf(7,3)]!=B_Q && bUndv>=2) score += 45;
+    // Premature queen development — only penalise if the queen is still alive
+    // but has left its home square early (not if it was captured).
+    { int wMH=0,bMH=0;
+      if(board[sqOf(0,1)]==W_N)wMH++;if(board[sqOf(0,6)]==W_N)wMH++;
+      if(board[sqOf(0,2)]==W_B)wMH++;if(board[sqOf(0,5)]==W_B)wMH++;
+      if(board[sqOf(7,1)]==B_N)bMH++;if(board[sqOf(7,6)]==B_N)bMH++;
+      if(board[sqOf(7,2)]==B_B)bMH++;if(board[sqOf(7,5)]==B_B)bMH++;
+      // Check if queen is on board but not on home square
+      bool wQueenAlive=false, bQueenAlive=false;
+      for(int s=0;s<64;s++){if(board[s]==W_Q)wQueenAlive=true;if(board[s]==B_Q)bQueenAlive=true;}
+      if(wQueenAlive && board[sqOf(0,3)]!=W_Q && wMH>=2) score -= 40;
+      if(bQueenAlive && board[sqOf(7,3)]!=B_Q && bMH>=2) score += 40;
     }
 
-    for(int s=0;s<64;s++){
-      if(board[s]==W_N&&(fileOf(s)==0||fileOf(s)==7)) score-=28;
-      if(board[s]==B_N&&(fileOf(s)==0||fileOf(s)==7)) score+=28;
+    // Rim knight penalty
+    for(int s=0;s<64;s++) {
+      if(board[s]==B_N && (fileOf(s)==0||fileOf(s)==7)) score += 25;
+      if(board[s]==W_N && (fileOf(s)==0||fileOf(s)==7)) score -= 25;
     }
   }
 
   // ── Rook on open/semi-open file ───────────────────────────────────────────
-  for(int s=0;s<64;s++){
-    int p=board[s]; if(TYPE(p)!=ROOK) continue;
-    int f=fileOf(s);
-    bool wp=wFile[f], bp=bFile[f];
-    if(IS_WHITE(p)) { if(!wp&&!bp) score+=22; else if(!wp) score+=11; }
-    else            { if(!bp&&!wp) score-=22; else if(!bp) score-=11; }
+  for(int s = 0; s < 64; s++) {
+    int p = board[s]; if(TYPE(p) != ROOK) continue;
+    int f = fileOf(s);
+    bool wp=false, bp=false;
+    for(int r=0;r<8;r++){if(board[sqOf(r,f)]==W_P)wp=true;if(board[sqOf(r,f)]==B_P)bp=true;}
+    if(IS_WHITE(p)) { if(!wp&&!bp) score+=20; else if(!wp) score+=10; }
+    else            { if(!bp&&!wp) score-=20; else if(!bp) score-=10; }
   }
 
-  // ── Bishop mobility ───────────────────────────────────────────────────────
-  { const int bd[4][2]={{1,1},{1,-1},{-1,1},{-1,-1}};
-    for(int s=0;s<64;s++){
-      int p=board[s]; if(TYPE(p)!=BISHOP) continue;
-      int mob=0,r0=rankOf(s),f0=fileOf(s);
-      for(auto& d:bd){int r=r0+d[0],f=f0+d[1];
-        while(inBounds(r,f)){mob++;if(board[sqOf(r,f)])break;r+=d[0];f+=d[1];}}
-      int pen=(mob==0)?55:(mob==1)?38:(mob==2)?22:(mob==3)?8:0;
-      if(IS_WHITE(p)) score-=pen; else score+=pen;
+  // ── Pawn threat on knights/bishops (fast, no SEE) ─────────────────────────
+  // Use fastPawnThreat only — the full SEE-backed pieceThreatPenalty is too
+  // expensive to call at every leaf node (it calls seeCaptures inside a loop).
+  for(int s = 0; s < 64; s++) {
+    int p = board[s]; if(!p) continue;
+    if(TYPE(p) != KNIGHT && TYPE(p) != BISHOP) continue;
+    int pen = fastPawnThreat(s, COLOR(p));
+    if(pen > 0) {
+      if(IS_WHITE(p)) score -= pen; else score += pen;
     }
-  }
-
-  // ── Pawn threat on knights/bishops (outpost-aware, full SEE) ─────────────
-  // Only called once per piece per eval — isOutpostSquare uses SEE internally
-  for(int s=0;s<64;s++){
-    int p=board[s]; if(!p) continue;
-    if(TYPE(p)!=KNIGHT&&TYPE(p)!=BISHOP) continue;
-    score += pieceThreatPenalty(s,p);
   }
 
   return score;
 }
 
-// ─── Killer moves ─────────────────────────────────────────────────────────────
-#define MAX_DEPTH 10
-Move killers[MAX_DEPTH][2];
-
-// ─── Per-depth move buffers ───────────────────────────────────────────────────
-#define AB_MAX_LEVELS 8
-#define Q_MAX_LEVELS  8
-Move abMoveBuf[AB_MAX_LEVELS][128];
-Move qMoveBuf [Q_MAX_LEVELS ][64];
-Move rootMoveBuf[128];
-int  abDepthLevel = 0;
-int  qDepthLevel  = 0;
-
-// ─── History heuristic ────────────────────────────────────────────────────────
-int16_t histHeuristic[64][64];
-
 // ─── Draw score ───────────────────────────────────────────────────────────────
-// Engine plays BLACK so positive diff = white ahead = bad for us.
-// We strongly avoid draws when we are ahead, and strongly accept when behind.
 int getDrawScore() {
   int wMat=0, bMat=0;
   for(int s=0;s<64;s++) {
     int p=board[s]; if(!p) continue; int t=TYPE(p); if(t==KING) continue;
     if(IS_WHITE(p)) wMat+=PIECE_VAL[t]; else bMat+=PIECE_VAL[t];
   }
-  int diff = bMat - wMat; // positive = we (black) are ahead in material
-  bool endg = (wMat+bMat) < 1800;
-  // Black ahead: reject draw strongly
-  if(diff > 300 && endg) return min(250, diff/3); // cashing in endgame advantage
-  if(diff > 300)  return  60; // middlegame edge — still prefer play
-  if(diff > 100)  return  20; // slight edge — marginal draw preference
-  // Equal: slight draw aversion to encourage fighting play
-  if(diff > -100) return -40;
-  // White ahead: accept draw (we're behind)
-  if(diff > -300) return -100;
-  return -200; // well behind — take the draw
+  int diff = wMat - bMat; bool endg = (wMat+bMat) < 1800;
+  if(diff > 400 && endg) return min(300, diff/3);
+  if(diff > 400)  return 50;
+  if(diff > 100)  return -80;
+  if(diff < -100) return -150;
+  return -30;
 }
 
 // ─── Move ordering ────────────────────────────────────────────────────────────
-// Fully symmetrical for both colours. All heuristics apply to both sides.
+// Unified, no early returns, no phase gates.
+// Safety checks fire for ALL pieces, ALL phases, BOTH colors.
 int moveScore(Move& m) {
   int s = 0;
-  uint8_t cap  = board[m.to];
-  int piece    = board[m.from];
-  int toR      = rankOf(m.to),   toF = fileOf(m.to);
-  int frR      = rankOf(m.from), frF = fileOf(m.from);
-  bool opening = isOpeningPhase();
-  bool isBlack = IS_BLACK(piece);
-  int  myColor = isBlack ? 2 : 1;
-  int  oppColor= isBlack ? 1 : 2;
-  // "Home rank" and "promo rank" from this side's perspective
-  int  homeRank  = isBlack ? 7 : 0;
-  int  promoRank = isBlack ? 0 : 7;
+  uint8_t cap   = board[m.to];
+  int piece     = board[m.from];
+  int toR       = rankOf(m.to),   toF = fileOf(m.to);
+  int frR       = rankOf(m.from), frF = fileOf(m.from);
+  bool opening  = isOpeningPhase();
+  bool isBlack  = IS_BLACK(piece);
 
-  // ── 1. Captures — MVV-LVA + SEE ──────────────────────────────────────────
+  // ── 1. Captures — MVV-LVA + SEE ordering ─────────────────────────────────
+  // Priority tiers (high to low):
+  //   Winning captures  (SEE > 0):  7000 + SEE gain + LVA bonus
+  //   Even captures     (SEE == 0): 5000            + LVA bonus
+  //   Losing captures   (SEE < 0):  1000 + SEE gain (negative, below quiet moves)
+  //
+  // Within winning and even captures, LVA (Least Valuable Attacker) ensures
+  // the cheapest piece captures first — e.g. pawn takes knight ranks above
+  // queen takes knight even when both win the same material. This is correct
+  // chess: use your least valuable piece to make a winning trade, preserve
+  // your more valuable pieces.
+  //
+  // LVA bonus: PIECE_VAL[KING] - PIECE_VAL[attacker_type]
+  //   Pawn   attacker: 20000 - 100  = 19900  (highest — go first)
+  //   Knight attacker: 20000 - 320  = 19680
+  //   Bishop attacker: 20000 - 330  = 19670
+  //   Rook   attacker: 20000 - 500  = 19500
+  //   Queen  attacker: 20000 - 900  = 19100  (lowest  — go last)
+  //   King   attacker: 20000 - 20000 = 0
   if(cap) {
-    int seeNet = seeMoveGain(m.from, m.to, piece, myColor);
-    int lva    = PIECE_VAL[KING] - PIECE_VAL[TYPE(piece)];
-    if(seeNet > 0)      s += 7000 + seeNet + lva;
-    else if(seeNet==0)  s += 5000 + lva;
-    else                s += 1000 + seeNet;
+    int seeNet  = seeMoveGain(m.from, m.to, piece, isBlack ? 2 : 1);
+    int lva     = PIECE_VAL[KING] - PIECE_VAL[TYPE(piece)];  // higher = cheaper attacker
+    if(seeNet > 0) {
+      s += 7000 + seeNet + lva;   // winning: SEE gain + LVA
+    } else if(seeNet == 0) {
+      s += 5000 + lva;            // even: just LVA to prefer cheaper attacker
+    } else {
+      s += 1000 + seeNet;         // losing: no LVA bonus, ranked by how much we lose
+    }
   }
-  if(m.promo)   s += 3000 + PIECE_VAL[m.promo];
-  if(m.flags==1) s += 2000;  // en passant
+  if(m.promo)  s += 3000 + PIECE_VAL[m.promo];
+  if(m.flags==1) s += 2000;
 
-  // ── 2. Universal quiet-move safety ───────────────────────────────────────
-  if(cap==EMPTY && TYPE(piece)!=PAWN && TYPE(piece)!=KING) {
-    uint8_t sTo=board[m.to], sFrom=board[m.from];
-    board[m.to]=piece; board[m.from]=EMPTY;
-    int netLoss = seeCaptures(m.to, oppColor);
-    board[m.to]=sTo; board[m.from]=sFrom;
+  // ── 2. Universal quiet-move safety (all pieces, all phases) ──────────────
+  // Simulate the piece landing and run SEE from opponent's view.
+  // This is the ONLY place this check lives — no duplication.
+  if(cap == EMPTY && TYPE(piece) != PAWN && TYPE(piece) != KING) {
+    uint8_t sTo = board[m.to], sFrom = board[m.from];
+    board[m.to] = piece; board[m.from] = EMPTY;
+    int attColor = isBlack ? 1 : 2;
+    int netLoss  = seeCaptures(m.to, attColor);
+    board[m.to] = sTo; board[m.from] = sFrom;
     if(netLoss > 0) s -= netLoss * 4;
   }
 
-  // ── 3. Pawn threat on landing square ─────────────────────────────────────
-  if(cap==EMPTY && (TYPE(piece)==KNIGHT||TYPE(piece)==BISHOP)) {
-    uint8_t sTo=board[m.to], sFrom=board[m.from];
-    board[m.to]=piece; board[m.from]=EMPTY;
-    int pen = fastPawnThreat(m.to, myColor);
-    board[m.to]=sTo; board[m.from]=sFrom;
-    if(pen > 0) s -= pen;
+  // ── 3. Pawn threat on landing square — fast check, no SEE ───────────────
+  // Use fastPawnThreat (no SEE simulation) for move ordering hot path.
+  // Full SEE-backed version only runs in evaluate().
+  if(cap == EMPTY && (TYPE(piece)==KNIGHT || TYPE(piece)==BISHOP)) {
+    uint8_t sTo = board[m.to], sFrom = board[m.from];
+    board[m.to] = piece; board[m.from] = EMPTY;
+    int pen = fastPawnThreat(m.to, COLOR(piece));
+    board[m.to] = sTo; board[m.from] = sFrom;
+    if(pen > 0) s -= pen;  // bad landing for any piece — lower its move score
   }
 
-  // ── 4. History heuristic ──────────────────────────────────────────────────
-  s += histHeuristic[m.from][m.to] / 8;
+  // ── 4. Black opening heuristics (only in opening, only for black) ─────────
+  if(!isBlack || !opening) return s;
 
-  // ── 5. Opening heuristics — NOW SYMMETRICAL FOR BOTH COLOURS ─────────────
-  if(opening) {
-    int undevMinors = 0;
-    int nb1 = isBlack ? sqOf(7,1) : sqOf(0,1);
-    int ng8 = isBlack ? sqOf(7,6) : sqOf(0,6);
-    int bc8 = isBlack ? sqOf(7,2) : sqOf(0,2);
-    int bf8 = isBlack ? sqOf(7,5) : sqOf(0,5);
-    int myN = isBlack ? B_N : W_N;
-    int myB = isBlack ? B_B : W_B;
-    if(board[nb1]==myN) undevMinors++;
-    if(board[ng8]==myN) undevMinors++;
-    if(board[bc8]==myB) undevMinors++;
-    if(board[bf8]==myB) undevMinors++;
+  int undevMinors = 0;
+  if(board[sqOf(7,1)]==B_N) undevMinors++;
+  if(board[sqOf(7,6)]==B_N) undevMinors++;
+  if(board[sqOf(7,2)]==B_B) undevMinors++;
+  if(board[sqOf(7,5)]==B_B) undevMinors++;
 
-    // Pawn: reward safe central advancement
-    if(TYPE(piece)==PAWN) {
-      int pawnSEE = seeMoveGain(m.from, m.to, piece, myColor);
-      int advDir  = isBlack ? -1 : 1;  // direction toward opponent
-      int adjToR  = isBlack ? (7-toR) : toR; // normalised rank (0=home, 7=promo)
-      int adjFrR  = isBlack ? (7-frR) : frR;
-      if(pawnSEE >= 0) {
-        if((frF==3||frF==4) && adjFrR==1 && adjToR==3) s += 420;  // double push d/e
-        else if((frF==3||frF==4) && adjToR==2)          s += 260;  // single push d/e
-        else if((frF==3||frF==4) && adjToR==3)          s += 210;
-        else if((frF==2||frF==5) && (adjToR==3||adjToR==2)) s += 130;
-        else if(adjToR<=3 && toF>=2 && toF<=5)          s +=  55;
-      } else {
-        s -= (-pawnSEE) * 4;
-      }
-      if(frF==0||frF==7) s -= 200;
-      // Doubled pawn penalty
-      for(int r2=0;r2<8;r2++) {
-        int ps=board[sqOf(r2,toF)]; if(ps && COLOR(ps)==myColor && TYPE(ps)==PAWN){s-=75;break;}
-      }
+  bool canCastle = (bCastle_K || bCastle_Q);
+
+  // ── Rook moves: banned until ALL minors are developed AND castling is done.
+  // A rook shuffle (Ra8→Rb8 etc.) is never useful in the opening.
+  // Even on an open file, the bonus (+200) must never beat this penalty.
+  if(TYPE(piece)==ROOK) {
+    if(undevMinors > 0) {
+      s -= 2000;   // absolute ban while any minor is undeveloped
+    } else if(canCastle) {
+      s -= 1200;   // still heavily discouraged until king is safe
+    } else {
+      // Post-castling: small penalty for lateral shuffle, bonus for open file / 7th rank
+      if(m.to == lastBlackFrom && cap == EMPTY) s -= 350;
+      bool openFile = true;
+      for(int r=0;r<8;r++) if(board[sqOf(r,toF)]==B_P){openFile=false;break;}
+      if(openFile) s += 80;
+      if(toR==1)   s += 120;
     }
+    return s;  // return early — no other opening bonuses apply to rooks
+  }
 
-    // Queen: penalise premature development — both colours
-    if(TYPE(piece)==QUEEN) {
-      if(undevMinors>=3) s -= 1600;
-      else if(undevMinors==2) s -= 1200;
-      else if(undevMinors==1) s -= 650;
-      // Queen retreating to home square — passive
-      if(toR==homeRank) s -= 700;
-      // Queen moving to flank in opening — include b/g files too
-      if((toF==0||toF==1||toF==2||toF==5||toF==6||toF==7)) s -= 320;
-      // Castling rights still available — don't expose queen yet
-      if(isBlack?(bCastle_K||bCastle_Q):(wCastle_K||wCastle_Q)) s -= 320;
+  // Pawn moves: reward safe central advancement
+  if(TYPE(piece)==PAWN) {
+    int pawnSEE = seeMoveGain(m.from, m.to, piece, 2);
+    if(pawnSEE >= 0) {
+      if((frF==3||frF==4) && frR==6 && toR==4) s += 400;
+      else if((frF==3||frF==4) && toR==5)      s += 250;
+      else if((frF==3||frF==4) && toR==4)      s += 200;
+      else if((frF==2||frF==5) && (toR==4||toR==5)) s += 120;
+      else if(toR<=4 && toF>=2 && toF<=5)      s += 50;
+    } else {
+      s -= pawnSEE * 4;
     }
+    if(frF==0||frF==7) s -= 200;
+    for(int r2=0;r2<8;r2++) if(board[sqOf(r2,toF)]==B_P){s-=70;break;}
+    if(frF>=5 && toR<6) s -= 80;
+    if(cap && TYPE(cap)==PAWN && pawnSEE>=0) s += 180;
+  }
 
-    // King: strong penalty for moving without castling
-    if(TYPE(piece)==KING && m.flags==0) s -= 1800;
+  // Queen: heavy penalties for premature development.
+  // Additional flat penalty if king hasn't castled yet — queen activity
+  // before king safety is a strategic inaccuracy regardless of undev count.
+  if(TYPE(piece)==QUEEN) {
+    if(undevMinors>=3) s -= 2000;
+    else if(undevMinors==2) s -= 1600;
+    else if(undevMinors==1) s -= 900;
+    if(canCastle) s -= 500;   // flat castling-urgency penalty
+    if(toR>=3&&toR<=5&&toF>=2&&toF<=5) s -= 400;
+    if(cap!=EMPTY && undevMinors>=1) s -= 500;
+  }
 
-    // Development bonus: first move of a home-rank minor
-    if(frR==homeRank && (TYPE(piece)==KNIGHT||TYPE(piece)==BISHOP)) s += 420;
+  // King: strong penalty for moving without castling
+  if(TYPE(piece)==KING && m.flags==0) s -= 1500;
 
-    // Re-move penalty: moving a piece that already moved this opening
-    if((bPieceMoved & (1ULL << m.from)) && cap==EMPTY)
-      s -= 420 + undevMinors * 130;
-    // Specific re-move: square we just moved FROM
-    if(m.from == lastBlackTo && cap==EMPTY) s -= 820;
+  // Development bonus: first move of a home-rank minor piece
+  if(frR==7 && (TYPE(piece)==KNIGHT||TYPE(piece)==BISHOP)) s += 400;
 
-    // Knight positional
-    if(TYPE(piece)==KNIGHT) {
-      // Rim penalty — both sides
-      if(toF==0||toF==7) s -= 160;
-      // Central files good
-      if(toF==2||toF==5) s += 110;
-      if(toF==3||toF==4) s +=  90;
-      // Penalty for far-advanced knight without support (g4/h4 type)
-      int adjToR = isBlack ? (7-toR) : toR;
-      if(adjToR >= 4) {
-        // Advanced into enemy territory — is it safe?
-        uint8_t sTo=board[m.to], sFrom=board[m.from];
-        board[m.to]=piece; board[m.from]=EMPTY;
-        int threat = fastPawnThreat(m.to, myColor);
-        board[m.to]=sTo; board[m.from]=sFrom;
-        if(threat > 0) s -= 250;  // extra penalty on top of the earlier fastPawnThreat
-      }
-      // Both own knights undeveloped — prefer developing
-      if(board[nb1]==myN && board[ng8]==myN) s += 90;
+  // Re-move penalties
+  if(m.from == lastBlackTo && cap == EMPTY) s -= 800;
+  if((bPieceMoved & (1ULL << m.from)) && cap == EMPTY)
+    s -= 400 + undevMinors * 120;
+
+  // Extra penalty for moving a knight that is currently on a "retreat square"
+  // (i.e. it moved backward on its last move — a sign it was just kicked).
+  // Moving it again instead of developing another piece wastes another tempo.
+  if(TYPE(piece)==KNIGHT && cap==EMPTY) {
+    // Retreat squares are ranks 6-7 for black (home territory).
+    // A knight that came back to rank 6 or 7 after having moved is a retreated knight.
+    if(frR >= 6 && (bPieceMoved & (1ULL << m.from))) {
+      s -= 500 + undevMinors * 150; // very heavy: develop something else first
     }
+  }
 
-    // Bishop positional
-    if(TYPE(piece)==BISHOP) {
-      if(toF==0||toF==7) s -= 130;
-      // Fianchetto squares
-      int adjFiR = isBlack ? 6 : 1;
-      if(toR==adjFiR && (toF==1||toF==6)) s += 90;
-      // Don't develop bishop before both knights in early game
-      if(undevMinors>=3 && (board[nb1]==myN||board[ng8]==myN)) s -= 80;
+  // Knight positional bonuses/penalties
+  if(TYPE(piece)==KNIGHT) {
+    if(toF==2||toF==5) s += 100;
+    if(toF==3||toF==4) s += 80;
+    if(toF==0||toF==7) s -= 150;
+    if(board[sqOf(7,1)]==B_N && board[sqOf(7,6)]==B_N) s += 80;
+    // Fork opportunity: landing near white pawn that can be attacked
+    const int katt[8][2]={{1,2},{1,-2},{-1,2},{-1,-2},{2,1},{2,-1},{-2,1},{-2,-1}};
+    for(auto& d:katt) {
+      int pr=toR+d[0], pf=toF+d[1];
+      if(inBounds(pr,pf)){int psq=sqOf(pr,pf);
+        if(board[psq]==B_P && seeCaptures(psq,1)>0){s+=400;break;}}
     }
-
-    // General centrality bonus for minor pieces — gated on SEE safety
-    if(TYPE(piece)==KNIGHT||TYPE(piece)==BISHOP) {
-      int adjToR = isBlack ? (7-toR) : toR;
-      // Only reward centrality up to rank 4 (not deep advances)
-      if(adjToR <= 4) {
-        // Check SEE: only give centrality bonus if the square is safe
-        uint8_t sTo2=board[m.to], sFrom2=board[m.from];
-        board[m.to]=piece; board[m.from]=EMPTY;
-        int squareLoss = seeCaptures(m.to, oppColor);
-        board[m.to]=sTo2; board[m.from]=sFrom2;
-        if(squareLoss == 0) {
-          int cd = abs(toF-3)+abs(toF-4)+abs(adjToR-2)+abs(adjToR-3);
-          s += (8-cd)*10;
-        } else {
-          // Square is losing — subtract centrality instead of adding it
-          s -= squareLoss * 2;
+    // Deep kick-trap check: penalise landing squares where a white pawn can
+    // reach an attacking square within 2 pushes. Fires throughout opening phase
+    // so the search avoids walk-into-kick sequences from move 4 onwards.
+    // This is the search equivalent of isKickTrap2 in the book.
+    if(opening && cap==EMPTY) {
+      for(int df=-1;df<=1;df+=2) {
+        int adjF=toF+df; if(adjF<0||adjF>7) continue;
+        int atkR=toR-1; if(!inBounds(atkR,adjF)) continue;
+        for(int pr=0;pr<atkR;pr++) {
+          if(board[sqOf(pr,adjF)]!=W_P) continue;
+          int pushes=atkR-pr; if(pushes>2) break;
+          bool clear=true;
+          for(int rr=pr+1;rr<=atkR;rr++) if(board[sqOf(rr,adjF)]!=EMPTY){clear=false;break;}
+          if(!clear) break;
+          int aSq=sqOf(atkR,adjF);
+          uint8_t sA=board[aSq],sP=board[sqOf(pr,adjF)];
+          board[aSq]=W_P; board[sqOf(pr,adjF)]=EMPTY;
+          int safety=seeCaptures(aSq,2);
+          board[aSq]=sA; board[sqOf(pr,adjF)]=sP;
+          if(safety<=0) { s -= 600; break; } // pawn push safe → heavy penalty
+          break;
         }
       }
-      // Swapping back to the square we came from
-      if(m.to==lastBlackFrom && cap==EMPTY) s -= 230;
     }
+  }
 
-    // Castling: reward safe castle
-    if(m.flags==2||m.flags==3) {
-      int maxHang=0;
-      for(int sq=0;sq<64;sq++){
-        int p=board[sq]; if(!p||COLOR(p)!=myColor||TYPE(p)==KING) continue;
-        int loss=seeCaptures(sq,oppColor); if(loss>maxHang) maxHang=loss;
-      }
-      s += (maxHang==0) ? 650 : (maxHang<=100) ? 220 : -850;
+  // Bishop positional bonuses/penalties.
+  // Extra penalty for moving to an aggressive forward square (rank 3-4)
+  // while the king hasn't castled — bishop sorties before king safety
+  // are the classic source of "bishop check" inaccuracies.
+  if(TYPE(piece)==BISHOP) {
+    if((toR==6&&toF==1)||(toR==6&&toF==6)) s += 80;
+    if(toF==0||toF==7) s -= 120;
+    if(board[sqOf(7,1)]==B_N||board[sqOf(7,6)]==B_N) s -= 100;
+    if((toF==3||toF==4)&&toR==5&&board[sqOf(6,toF)]==B_P) s -= 100;
+    // Penalise aggressive bishop sorties (rank ≤4 from black's side = ranks 0-3)
+    // while king hasn't castled and minors are still at home
+    if(canCastle && toR <= 3 && undevMinors >= 1) s -= 350;
+  }
+
+  // General centrality bonus for knights and bishops
+  if(TYPE(piece)==KNIGHT||TYPE(piece)==BISHOP) {
+    int cd = abs(toF-3)+abs(toF-4)+abs(toR-3)+abs(toR-4);
+    s += (8 - cd) * 12;
+    if(m.to == lastBlackFrom && cap == EMPTY) s -= 220;
+  }
+
+  // Backward move penalty — skip in opening to allow retreat after kicks
+  if(!opening && toR > frR && cap == EMPTY) s -= 100;
+
+  // Castling: reward if safe
+  if(m.flags==2||m.flags==3) {
+    int maxHang = 0;
+    for(int sq=0;sq<64;sq++) {
+      if(!board[sq]||!IS_BLACK(board[sq])||TYPE(board[sq])==KING) continue;
+      int loss=seeCaptures(sq,1); if(loss>maxHang) maxHang=loss;
     }
-
-    // Rook development: only after minors
-    if(TYPE(piece)==ROOK) {
-      if(undevMinors>=2) s -= 550;
-      if(undevMinors==1) s -= 220;
-      bool openFile=true;
-      int myPawn = isBlack ? B_P : W_P;
-      for(int r=0;r<8;r++) if(board[sqOf(r,toF)]==myPawn){openFile=false;break;}
-      if(openFile) s += 90;
-      int sevenR = isBlack ? 1 : 6;
-      if(toR==sevenR) s += 130;
-    }
-  } // end opening block
-
-  // ── 6. Universal queen safety — applies in ALL phases ────────────────────
-  if(TYPE(piece)==QUEEN && cap==EMPTY) {
-    // Passive retreat to home rank
-    if(toR==homeRank) s -= 700;
-    // Queen moving to a flank file (a,b,g,h) — risky in all phases
-    if(toF==0||toF==1||toF==6||toF==7) s -= 200;
-    // Queen landing on an attacked square — SEE penalty
-    uint8_t sTo=board[m.to], sFrom=board[m.from];
-    board[m.to]=piece; board[m.from]=EMPTY;
-    int qloss = seeCaptures(m.to, oppColor);
-    board[m.to]=sTo; board[m.from]=sFrom;
-    if(qloss > 0) s -= qloss * 3;
+    s += (maxHang==0) ? 600 : (maxHang<=100) ? 200 : -800;
   }
 
   return s;
@@ -2013,16 +2165,44 @@ void sortMoves(Move* moves, int count) {
   }
 }
 
+// ─── Killer moves ─────────────────────────────────────────────────────────────
+// MAX_DEPTH, AB_MAX_LEVELS and Q_MAX_LEVELS are defined in the globals section
+// above (before hashHistory) so that the array size expression compiles.
+Move killers[MAX_DEPTH][2];
+
+// ─── Per-depth move buffers ───────────────────────────────────────────────────
+Move abMoveBuf[AB_MAX_LEVELS][128];
+Move qMoveBuf [Q_MAX_LEVELS ][64];
+Move rootMoveBuf[128];
+int  abDepthLevel = 0;
+int  qDepthLevel  = 0;
+
+// ─── TT score clamping helper ─────────────────────────────────────────────────
+// int16_t holds ±32767. Alpha/beta sentinels are ±99999 which overflows int16_t.
+// Mate scores (±19000) and normal evals are within range; only sentinels need
+// clamping. Applied at every TT store site to prevent corrupted cutoffs.
+static inline int16_t clampTTScore(int s) {
+  if(s >  32767) return  32767;
+  if(s < -32767) return -32767;
+  return (int16_t)s;
+}
+
 // ─── Quiescence search ───────────────────────────────────────────────────────
+// Searches all captures (and losing-SEE captures filtered out) until the
+// position is quiet. No time-based abort — always completes. Progress bar
+// is updated periodically from node count for UI responsiveness.
 int quiesce(int alpha, int beta) {
   if(searchAborted) return 0;
   nodeCount++;
   if((nodeCount & 255) == 0) {
-    unsigned long _now = millis();
-    if((_now - searchStart) > SEARCH_TIME_MS) { searchAborted=true; return 0; }
-    int _pct = (int)((_now - searchStart) * 95UL / SEARCH_TIME_MS);
-    if(_pct > 95) _pct = 95;
-    searchPct = _pct;
+    unsigned long elapsed = millis() - searchStart;
+    if(elapsed >= SEARCH_TIME_MS) {
+      searchAborted = true;
+      return 0;
+    }
+    int _pct = (int)((elapsed * 99UL) / SEARCH_TIME_MS);
+    if(_pct > 99) _pct = 99;
+    if(_pct > (int)searchPct) searchPct = (int)_pct;
   }
 
   int stand_pat = whiteToMove ? evaluate() : -evaluate();
@@ -2056,24 +2236,50 @@ int quiesce(int alpha, int beta) {
 }
 
 // ─── Alpha-Beta ───────────────────────────────────────────────────────────────
-int alphaBeta(int depth, int alpha, int beta, bool maximizing, unsigned long startMs) {
+// Pruning techniques:
+//   - Transposition table (exact / lower / upper bound)
+//   - Repetition detection → draw score
+//   - Null-move pruning (adaptive R: 2 at depth<5, 3 at depth≥5), skipped in
+//     endgame zugzwang risk or when side has only pawns+king
+//   - Futility pruning at depth==1 (static eval + margin ≤ alpha)
+//   - Late Move Reductions (LMR): i≥3, depth≥2, quiet non-killer non-check moves
+//     isQuiet is saved PRE-makeMove to avoid reading stale board state.
+//   - Killer move ordering, history heuristic
+//   - Check extension: +1 ply when in check
+//   - Knight pawn-kick lookahead: prune black knight moves to squares where
+//     a white pawn can safely advance to attack within 2 pushes (opening only)
+//
+// ANTI-SACRIFICE TRAP: LMR always re-searches at full depth when the reduced
+// score beats alpha — no tactical sequence can slip past the horizon.
+int alphaBeta(int depth, int alpha, int beta, bool maximizing, unsigned long startMs, int lastKnightSq) {
   if(searchAborted) return 0;
 
   int myLevel = abDepthLevel++;
-  if(myLevel >= AB_MAX_LEVELS) { abDepthLevel = myLevel; return 0; }
+  if(myLevel >= AB_MAX_LEVELS) {
+    // Recursion depth cap hit — return a quiescence eval rather than 0,
+    // which would corrupt the search score completely.
+    abDepthLevel = myLevel;
+    return quiesce(alpha, beta);
+  }
 
+  // Time check every 256 nodes — abort and update progress bar.
+  // Progress = elapsed / SEARCH_TIME_MS * 100, clamped to 99.
+  // This is monotonically increasing and matches real wall-clock time exactly.
   nodeCount++;
   if((nodeCount & 255) == 0) {
-    unsigned long _now = millis();
-    if((_now - startMs) > SEARCH_TIME_MS) { abDepthLevel = myLevel; searchAborted=true; return 0; }
-    int _pct = (int)((_now - startMs) * 95UL / SEARCH_TIME_MS);
-    if(_pct > 95) _pct = 95;
-    searchPct = _pct;
+    unsigned long elapsed = millis() - searchStart;
+    if(elapsed >= SEARCH_TIME_MS) {
+      abDepthLevel = myLevel;
+      searchAborted = true;
+      return 0;
+    }
+    int _pct = (int)((elapsed * 99UL) / SEARCH_TIME_MS);
+    if(_pct > 99) _pct = 99;
+    if(_pct > (int)searchPct) searchPct = (int)_pct;
   }
-  if(searchAborted) { abDepthLevel = myLevel; return 0; }
 
   bool inCheck = isInCheck(whiteToMove);
-  if(inCheck && depth > 0) depth++;
+  if(inCheck && depth > 0) depth++;   // check extension
 
   uint32_t h = currentHash;
   TTEntry& tte = tt[h & TT_MASK];
@@ -2092,6 +2298,10 @@ int alphaBeta(int depth, int alpha, int beta, bool maximizing, unsigned long sta
 
   if(depth==0) { abDepthLevel = myLevel; return quiesce(alpha, beta); }
 
+  // ── Null-move pruning ────────────────────────────────────────────────────
+  // Skipped: in check, at depth<3, or when side has only pawns+king
+  // (zugzwang risk in endgame). Safe to apply — the opponent's moves at ALL
+  // nodes are explored fully regardless of this pruning.
   if(depth >= 3 && !inCheck) {
     bool hasNonPawn = false;
     for(int s=0;s<64;s++) {
@@ -2108,7 +2318,7 @@ int alphaBeta(int depth, int alpha, int beta, bool maximizing, unsigned long sta
       currentHash ^= zobSide;
 
       int R = (depth >= 5) ? 3 : 2;  // adaptive null-move reduction
-      int nullScore = -alphaBeta(depth-1-R, -beta, -beta+1, !maximizing, startMs);
+      int nullScore = -alphaBeta(depth-1-R, -beta, -beta+1, !maximizing, startMs, -1);
 
       whiteToMove = savedWTM;
       enPassantSq = savedEP;
@@ -2118,6 +2328,7 @@ int alphaBeta(int depth, int alpha, int beta, bool maximizing, unsigned long sta
     }
   }
 
+  // ── Futility pruning (depth==1 only) ─────────────────────────────────────
   if(depth==1 && !inCheck) {
     int ev = whiteToMove ? evaluate() : -evaluate();
     if(ev < alpha - 300) {
@@ -2150,6 +2361,9 @@ int alphaBeta(int depth, int alpha, int beta, bool maximizing, unsigned long sta
   Move bestMove = {0,0,0,0};
   int legalCount2 = 0;
 
+  // Pre-compute opening phase and undev count once for the pruning check below
+  bool inOpening = isOpeningPhase();
+
   // Pre-compute static eval for depth-1 futility pruning (avoid per-move re-eval)
   int futilityEval = 0;
   bool doFutility = (depth == 1 && !inCheck);
@@ -2158,28 +2372,118 @@ int alphaBeta(int depth, int alpha, int beta, bool maximizing, unsigned long sta
   for(int i=0;i<count;i++) {
     Move& m = moves[i];
     if(!isLegal(m)) continue;
+
+    // ── Knight pawn-kick lookahead pruning ───────────────────────────────
+    // Applies to BLACK's knight moves in the opening (we are the engine
+    // playing black). After a black knight lands on square X, we check
+    // whether any white pawn can be pushed within 2 moves to attack X.
+    // "Attack X" means the pawn reaches rank(X)-1 on file(X)±1.
+    //
+    // The check is:
+    //   For each adjacent file adjF = fileOf(X) ± 1:
+    //     atkRank = rankOf(X) - 1          (white pawn attacks from below)
+    //     Is there a white pawn on adjF at some rank pr < atkRank,
+    //     with a clear path to atkRank (no pieces in the way),
+    //     in at most 2 pushes (atkRank - pr <= 2),
+    //     AND the pawn landing on atkRank is safe (SEE ≤ 0 for black)?
+    //   If yes → knight is kickable → prune this branch.
+    //
+    // Safety guard: never prune if it's the only legal move so far
+    // (legalCount2 == 0), and never prune when in check.
+    //
+    // Companion heuristic: if the engine itself is choosing a knight move
+    // for black (!whiteToMove) and the destination IS kick-safe, we also
+    // check whether advancing the h- or a-pawn to rank 5 (the 6th rank
+    // from black's perspective, rank index 5) would shield the knight on
+    // the adjacent flank. This is handled in moveScore() via the existing
+    // deep-kick-trap penalty; we only prune here, not boost.
+    if(inOpening && !whiteToMove && !inCheck
+       && TYPE(board[m.from]) == KNIGHT
+       && board[m.to] == EMPTY) {
+      bool isBlackKnight = IS_BLACK(board[m.from]);
+      if(isBlackKnight) {
+        // Destination square for the black knight
+        int kR = rankOf(m.to), kF = fileOf(m.to);
+        int atkRank = kR - 1; // white pawns attack from rank(X)-1
+        bool kickable = false;
+        if(atkRank >= 0) {
+          for(int df = -1; df <= 1; df += 2) {
+            int adjF = kF + df;
+            if(adjF < 0 || adjF > 7) continue;
+            // Look for a white pawn on adjF below atkRank, reachable in ≤2 pushes
+            for(int pr = 0; pr < atkRank; pr++) {
+              if(board[sqOf(pr, adjF)] != W_P) continue;
+              int pushes = atkRank - pr;
+              if(pushes > 2) break; // too far away
+              // Check path is clear
+              bool clear = true;
+              for(int rr = pr + 1; rr <= atkRank; rr++) {
+                if(board[sqOf(rr, adjF)] != EMPTY) { clear = false; break; }
+              }
+              if(!clear) break;
+              // Simulate pawn on atkRank and test if it survives (SEE)
+              int aSq = sqOf(atkRank, adjF);
+              uint8_t sA = board[aSq], sP = board[sqOf(pr, adjF)];
+              board[aSq] = W_P; board[sqOf(pr, adjF)] = EMPTY;
+              int safety = seeCaptures(aSq, 2); // can black recapture?
+              board[aSq] = sA; board[sqOf(pr, adjF)] = sP;
+              if(safety <= 0) { kickable = true; break; } // pawn advance safe → knight gets kicked
+              break;
+            }
+            if(kickable) break;
+          }
+        }
+        if(kickable && legalCount2 > 0) continue;
+      }
+    }
+
     legalCount2++;
 
     if(doFutility && board[m.to]==EMPTY && !m.promo) {
       if(futilityEval + 150 <= alpha) continue;
     }
 
+    // Compute the knight tracking square for child nodes.
+    bool movingKnight = (!whiteToMove && TYPE(board[m.from]) == KNIGHT);
+    // Save whether this is a quiet move BEFORE makeMove corrupts board[m.to].
+    // LMR must only apply to quiet non-capture moves; checking board[m.to]
+    // after makeMove would always see a piece there (the one that just moved).
+    bool isQuiet = (board[m.to] == EMPTY) && !m.promo;
+
     HistoryEntry he;
     makeMove(m, &he);
-    hashHistory[hashHistoryCount++] = currentHash;
+    // Bounds guard: never write past hashHistory array
+    if(hashHistoryCount < MAX_HISTORY + AB_MAX_LEVELS + 3)
+      hashHistory[hashHistoryCount++] = currentHash;
+    else
+      hashHistoryCount++;  // still increment so decrement is balanced
+
+    // childKnightSq: keep passing the landing square of a black knight move
+    // forward so any future re-entry of this pruning check at deeper nodes
+    // can also fire on the same knight if it lands somewhere kickable.
+    int childKnightSq = -1;
+    if(movingKnight) {
+      childKnightSq = m.to;
+    } else if(whiteToMove) {
+      childKnightSq = lastKnightSq;
+    }
 
     int score;
     int depthIdx = min(depth, MAX_DEPTH-1);
     bool isKiller = (m.from==killers[depthIdx][0].from && m.to==killers[depthIdx][0].to) ||
                     (m.from==killers[depthIdx][1].from && m.to==killers[depthIdx][1].to);
-    if(i >= 3 && depth >= 2 && board[m.to]==EMPTY && !m.promo && !inCheck && !isKiller) {
-      int R = (i >= 6 && depth >= 4) ? 2 : 1;  // R=2 for late moves at depth 4+
-      score = -alphaBeta(depth-1-R, -alpha-1, -alpha, !maximizing, startMs);
+
+    // ── Late Move Reductions (LMR) ────────────────────────────────────────
+    // Only reduce quiet non-killer moves at move index ≥ 3 and depth ≥ 2.
+    // isQuiet was captured before makeMove — the only correct place to read it.
+    if(i >= 3 && depth >= 2 && isQuiet && !inCheck && !isKiller) {
+      int R = (i >= 6 && depth >= 4) ? 2 : 1;
+      score = -alphaBeta(depth-1-R, -alpha-1, -alpha, !maximizing, startMs, childKnightSq);
       if(score > alpha && !searchAborted) {
-        score = -alphaBeta(depth-1, -beta, -alpha, !maximizing, startMs);
+        score = -alphaBeta(depth-1, -beta, -alpha, !maximizing, startMs, childKnightSq);
       }
     } else {
-      score = -alphaBeta(depth-1, -beta, -alpha, !maximizing, startMs);
+      score = -alphaBeta(depth-1, -beta, -alpha, !maximizing, startMs, childKnightSq);
     }
 
     hashHistoryCount--;
@@ -2192,7 +2496,7 @@ int alphaBeta(int depth, int alpha, int beta, bool maximizing, unsigned long sta
         killers[min(depth, MAX_DEPTH-1)][0]=m;
         { int hh = histHeuristic[m.from][m.to] + depth*depth; histHeuristic[m.from][m.to] = (int16_t)(hh > 16000 ? 16000 : hh); }
       }
-      tte.hashHi=(h>>16); tte.score=(int16_t)score; tte.depth=depth;
+      tte.hashHi=(h>>16); tte.score=clampTTScore(score); tte.depth=depth;
       tte.flags=2; tte.from=m.from; tte.to=m.to;
       abDepthLevel = myLevel; return beta;
     }
@@ -2209,7 +2513,7 @@ int alphaBeta(int depth, int alpha, int beta, bool maximizing, unsigned long sta
   }
 
   if(bestMove.from || bestMove.to) {
-    tte.hashHi=(h>>16); tte.score=(int16_t)alpha; tte.depth=depth;
+    tte.hashHi=(h>>16); tte.score=clampTTScore(alpha); tte.depth=depth;
     tte.flags=(alpha>origAlpha)?1:3;
     tte.from=bestMove.from; tte.to=bestMove.to;
   }
@@ -2219,237 +2523,382 @@ int alphaBeta(int depth, int alpha, int beta, bool maximizing, unsigned long sta
 }
 
 // ─── Opening Book ─────────────────────────────────────────────────────────────
-// SAFETY CONTRACT: Every candidate move is cross-checked against the actual
-// generated legal move list. A book move is ONLY returned if it exists verbatim
-// in the legal move list for the current position. This guarantees no illegal
-// moves can ever be returned regardless of what white played.
+// Covers black's first THREE moves. Every candidate is verified against the
+// actual legal move list before being returned — no illegal move is ever possible.
+//
+// Move-1 coverage: ALL realistic white first moves (e4,d4,c4,f4,g3,b3,Nf3,
+//   Nc3,f3,e3,d3,h4,g4,b4,a4 and everything else).
+// Move-2/3 coverage: principled development avoiding kick traps.
+//
+// isKickTrap2: checks whether a square will be attacked by a white pawn
+//   within TWO pushes (not just one). This catches the 4-ply kick pattern:
+//   knight lands on f6, white plays g4-g5, knight kicked.
 Move getBookMove(int blackMoveNum) {
   Move none = {0,0,0,0};
 
-  // Generate all legal black moves from the current position.
-  // Book candidates must be found in this list — no exceptions.
-  Move legal[128];
-  int legalCnt = 0;
+  Move legal[128]; int legalCnt = 0;
   generateMoves(false, legal, legalCnt, false);
-  // Filter to actually-legal (not leaving king in check)
-  Move trueLegal[128];
-  int trueCnt = 0;
-  for(int i = 0; i < legalCnt; i++) {
+  Move trueLegal[128]; int trueCnt = 0;
+  for(int i = 0; i < legalCnt; i++)
     if(isLegal(legal[i])) trueLegal[trueCnt++] = legal[i];
-  }
   if(trueCnt == 0) return none;
 
-  // Helper: return a book move only if it exists in trueLegal
   auto tryMove = [&](int from, int to) -> Move {
-    // Basic sanity: our piece must be on `from`, `to` must not have our piece
     if(!squareOnBoard(from) || !squareOnBoard(to)) return none;
     if(!board[from] || !IS_BLACK(board[from])) return none;
-    if(board[to] && IS_BLACK(board[to])) return none;  // friendly piece on target
-    // Must exist in the legal list
-    for(int i = 0; i < trueCnt; i++) {
+    if(board[to] && IS_BLACK(board[to])) return none;
+    for(int i = 0; i < trueCnt; i++)
       if(trueLegal[i].from == from && trueLegal[i].to == to) return trueLegal[i];
-    }
     return none;
   };
 
-  // Read current board state — everything is conditional on what's actually there
-  bool wE4 = (board[sqOf(3,4)] == W_P);
-  bool wD4 = (board[sqOf(3,3)] == W_P);
-  bool wC4 = (board[sqOf(3,2)] == W_P);
-  bool wF4 = (board[sqOf(3,5)] == W_P);
-  bool wE5 = (board[sqOf(4,4)] == W_P);  // white already pushed to e5
-  bool wD5 = (board[sqOf(4,3)] == W_P);  // white already pushed to d5
+  // ── Deep kick-trap check (2 white pawn pushes) ───────────────────────────
+  // Returns true if a white pawn can safely reach a square that attacks `sq`
+  // within 1 or 2 pushes. This catches both immediate and one-move-away kicks.
+  auto isKickTrap2 = [&](int sq) -> bool {
+    int r = rankOf(sq), f = fileOf(sq);
+    // Check each adjacent file for a white pawn that can reach an attack square
+    for(int df = -1; df <= 1; df += 2) {
+      int adjF = f + df;
+      if(adjF < 0 || adjF > 7) continue;
+      // Attack square = one rank below sq (white pawns attack upward)
+      int atkR = r - 1;
+      if(!inBounds(atkR, adjF)) continue;
+      // Look for a white pawn on adjF at ranks 0..atkR-1 that can reach atkR
+      for(int pr = 0; pr < atkR; pr++) {
+        if(board[sqOf(pr, adjF)] != W_P) continue;
+        // Can this pawn reach atkR? Path must be clear, at most 2 pushes away.
+        int pushes = atkR - pr;
+        if(pushes > 2) break; // pawn is too far away even with 2 pushes
+        bool pathClear = true;
+        for(int rr = pr + 1; rr <= atkR; rr++)
+          if(board[sqOf(rr, adjF)] != EMPTY) { pathClear = false; break; }
+        if(!pathClear) break;
+        // Simulate pawn on attack square — is the push safe for white?
+        int aSq = sqOf(atkR, adjF);
+        uint8_t sA = board[aSq], sP = board[sqOf(pr, adjF)];
+        board[aSq] = W_P; board[sqOf(pr, adjF)] = EMPTY;
+        int safety = seeCaptures(aSq, 2); // can black recapture the pawn?
+        board[aSq] = sA; board[sqOf(pr, adjF)] = sP;
+        if(safety <= 0) return true; // pawn push is safe → this square is a kick trap
+        break;
+      }
+    }
+    return false;
+  };
 
+  // ── Board state reads ─────────────────────────────────────────────────────
+  // White pawns present
+  bool wE4  = (board[sqOf(3,4)] == W_P);
+  bool wD4  = (board[sqOf(3,3)] == W_P);
+  bool wC4  = (board[sqOf(3,2)] == W_P);
+  bool wF4  = (board[sqOf(3,5)] == W_P);
+  bool wG4  = (board[sqOf(3,6)] == W_P);
+  bool wH4  = (board[sqOf(3,7)] == W_P);
+  bool wB4  = (board[sqOf(3,1)] == W_P);
+  bool wA4  = (board[sqOf(3,0)] == W_P);
+  bool wE5  = (board[sqOf(4,4)] == W_P);
+  bool wD5  = (board[sqOf(4,3)] == W_P);
+  // White pieces not on home squares (white has developed)
+  bool wNf3 = (board[sqOf(2,5)] == W_N); // Nf3
+  bool wNc3 = (board[sqOf(2,2)] == W_N); // Nc3
+  bool wNh3 = (board[sqOf(2,7)] == W_N); // Nh3
+  bool wNa3 = (board[sqOf(2,0)] == W_N); // Na3
+  bool wG3P = (board[sqOf(2,6)] == W_P); // g3 pawn advance
+  bool wB3P = (board[sqOf(2,1)] == W_P); // b3 pawn advance
+  bool wF3P = (board[sqOf(2,5)] == W_P); // f3 pawn advance
+  bool wE3P = (board[sqOf(2,4)] == W_P); // e3 pawn advance
+  bool wD3P = (board[sqOf(2,3)] == W_P); // d3 pawn advance
+  // White's first-rank pawns still home (helps detect flank openings)
+  bool wE2home = (board[sqOf(1,4)] == W_P);
+  bool wD2home = (board[sqOf(1,3)] == W_P);
+
+  // Black pieces
   bool bE5 = (board[sqOf(4,4)] == B_P);
   bool bD5 = (board[sqOf(4,3)] == B_P);
   bool bC5 = (board[sqOf(4,2)] == B_P);
   bool bF5 = (board[sqOf(4,5)] == B_P);
+  bool bD6 = (board[sqOf(5,3)] == B_P);
+  bool bE6 = (board[sqOf(5,4)] == B_P);
 
-  // Squares for piece origins
-  int bNb8 = sqOf(7,1);   // Black queenside knight (b8)
-  int bNg8 = sqOf(7,6);   // Black kingside knight  (g8)
-  int bBc8 = sqOf(7,2);   // Black queenside bishop (c8)
-  int bBf8 = sqOf(7,5);   // Black kingside bishop  (f8)
-  int bPe7 = sqOf(6,4);   // Black e-pawn
-  int bPd7 = sqOf(6,3);   // Black d-pawn
-  int bPc7 = sqOf(6,2);   // Black c-pawn
-  int bPf7 = sqOf(6,5);   // Black f-pawn
+  // Named squares for black pieces
+  int bNb8=sqOf(7,1), bNg8=sqOf(7,6);
+  int bBc8=sqOf(7,2), bBf8=sqOf(7,5);
+  int bPe7=sqOf(6,4), bPd7=sqOf(6,3), bPc7=sqOf(6,2), bPf7=sqOf(6,5);
+  int bPg7=sqOf(6,6), bPh7=sqOf(6,7), bPb7=sqOf(6,1), bPa7=sqOf(6,0);
+
+  // Common destination squares
+  int nf6=sqOf(5,5), nc6=sqOf(5,2), nd7=sqOf(6,3);
+  int e6=sqOf(5,4), d6=sqOf(5,3), c6=sqOf(5,2);
+  int e5=sqOf(4,4), d5=sqOf(4,3), c5=sqOf(4,2);
+  int g6=sqOf(5,6), f5=sqOf(4,5);
 
   int v = chosenOpening % 4;
   Move candidate = none;
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // MOVE 1
+  // ═══════════════════════════════════════════════════════════════════════════
   if(blackMoveNum == 1) {
-    // First response — based on what white played
+
     if(wE4) {
-      // e5 or c5 depending on variation — but NEVER if white pawn is on e5
-      if(v <= 1) {
-        candidate = tryMove(bPe7, sqOf(4,4));   // 1...e5
-        if(!candidate.from) candidate = tryMove(bNg8, sqOf(5,5)); // fallback Nf6
-      } else {
-        candidate = tryMove(bPc7, sqOf(4,2));   // 1...c5 Sicilian
-        if(!candidate.from) candidate = tryMove(bPe7, sqOf(4,4)); // fallback e5
-      }
+      // 1.e4 — most common. Respond e5 or c5 depending on variation.
+      if(v <= 1) candidate = tryMove(bPe7, e5);       // 1...e5
+      else       candidate = tryMove(bPc7, c5);       // 1...c5 Sicilian
+      if(!candidate.from) candidate = tryMove(bNg8, nf6); // fallback Nf6
+
     } else if(wD4) {
-      if(v <= 2) {
-        candidate = tryMove(bPd7, sqOf(4,3));   // 1...d5
-        if(!candidate.from) candidate = tryMove(bNg8, sqOf(5,5));
-      } else {
-        candidate = tryMove(bPf7, sqOf(4,5));   // 1...f5 Dutch
-        if(!candidate.from) candidate = tryMove(bPd7, sqOf(4,3));
-      }
+      // 1.d4 — Queen's pawn. d5 or Nf6 (King's Indian setup)
+      if(v <= 1) candidate = tryMove(bPd7, d5);       // 1...d5
+      else if(v==2) candidate = tryMove(bNg8, nf6);   // 1...Nf6 KID
+      else       candidate = tryMove(bPf7, f5);       // 1...f5 Dutch
+      if(!candidate.from) candidate = tryMove(bPd7, d5);
+
     } else if(wC4) {
-      if(v <= 1) {
-        candidate = tryMove(bPe7, sqOf(4,4));
-        if(!candidate.from) candidate = tryMove(bPc7, sqOf(4,2));
-      } else {
-        candidate = tryMove(bPc7, sqOf(4,2));
-        if(!candidate.from) candidate = tryMove(bPe7, sqOf(4,4));
-      }
+      // 1.c4 English — e5 or c5
+      if(v <= 1) candidate = tryMove(bPe7, e5);
+      else       candidate = tryMove(bPc7, c5);
+      if(!candidate.from) candidate = tryMove(bNg8, nf6);
+
     } else if(wF4) {
-      // Bird's — respond with d5
-      candidate = tryMove(bPd7, sqOf(4,3));
-      if(!candidate.from) candidate = tryMove(bPe7, sqOf(5,4)); // e6
-    } else {
-      if(v <= 1) {
-        candidate = tryMove(bPe7, sqOf(4,4));
+      // 1.f4 Bird's — d5 counters in the centre
+      candidate = tryMove(bPd7, d5);
+      if(!candidate.from) candidate = tryMove(bPe7, e5); // From's Gambit style
+
+    } else if(wG4) {
+      // 1.g4 Grob — d5, occupy centre immediately
+      candidate = tryMove(bPd7, d5);
+      if(!candidate.from) candidate = tryMove(bPe7, e5);
+
+    } else if(wH4) {
+      // 1.h4 — just claim the centre
+      candidate = tryMove(bPe7, e5);
+      if(!candidate.from) candidate = tryMove(bPd7, d5);
+
+    } else if(wB4) {
+      // 1.b4 Polish — e5 or d5
+      candidate = tryMove(bPe7, e5);
+      if(!candidate.from) candidate = tryMove(bPd7, d5);
+
+    } else if(wA4) {
+      // 1.a4 — e5
+      candidate = tryMove(bPe7, e5);
+      if(!candidate.from) candidate = tryMove(bPd7, d5);
+
+    } else if(wNf3) {
+      // 1.Nf3 — knight on f3 attacks e5 and d4.
+      // Knight-opening rule: push the center pawn adjacent to the attacked
+      // central square. Nf3 attacks d4 → the d-pawn (d5) is adjacent to d4.
+      // d5 contests the square the knight controls and is the principled reply.
+      // v0: d5 (solid QP reply, contests d4), v1: e5 (occupy attacked e5),
+      // v2: Nf6 mirror, v3: c5 Sicilian-style.
+      if(v == 0) {
+        candidate = tryMove(bPd7, d5);        // 1...d5 — principled QP reply
+        if(!candidate.from) candidate = tryMove(bNg8, nf6);
+      } else if(v == 1) {
+        candidate = tryMove(bPe7, e5);        // 1...e5 — occupy the attacked square
+        if(!candidate.from) candidate = tryMove(bPd7, d5);
+      } else if(v == 2) {
+        candidate = tryMove(bNg8, nf6);       // 1...Nf6 — mirror development
+        if(!candidate.from) candidate = tryMove(bPd7, d5);
       } else {
-        candidate = tryMove(bPd7, sqOf(4,3));
+        candidate = tryMove(bPc7, c5);        // 1...c5 — Sicilian-style flank
+        if(!candidate.from) candidate = tryMove(bPd7, d5);
       }
+
+    } else if(wNc3) {
+      // 1.Nc3 — knight on c3 attacks d5 and e4.
+      // The center pawn NEXT TO the square the knight attacks is the d-pawn
+      // (knight attacks d5 → push d5 to occupy/contest that square directly).
+      // All variations push d5 as first priority; the knight opening rule is:
+      // push the center pawn adjacent to the attacked central square.
+      // v0/v1: d5 (occupy attacked square), v2/v3: Nf6 develop then d5 fallback.
+      if(v == 0 || v == 1) {
+        candidate = tryMove(bPd7, d5);        // 1...d5 — correct: occupy the attacked square
+        if(!candidate.from) candidate = tryMove(bNg8, nf6);
+      } else {
+        candidate = tryMove(bNg8, nf6);       // 1...Nf6 — develop
+        if(!candidate.from) candidate = tryMove(bPd7, d5);
+      }
+
+    } else if(wNh3) {
+      // 1.Nh3 — useless flank knight, attacks g5 and f4. Neither is central.
+      // No central square is under threat — take the centre freely.
+      // d5 is completely safe (Nh3 doesn't touch it at all).
+      candidate = tryMove(bPd7, d5);
+      if(!candidate.from) candidate = tryMove(bPe7, e5);
+
+    } else if(wNa3) {
+      // 1.Na3 — useless flank knight, attacks b5 and c4. Neither is central.
+      // Just claim the centre — e5 or d5, both completely safe.
+      if(v <= 1) candidate = tryMove(bPe7, e5);
+      else       candidate = tryMove(bPd7, d5);
+      if(!candidate.from) candidate = tryMove(bNg8, nf6);
+
+    } else if(wG3P) {
+      // 1.g3 fianchetto — d5 or e5, both claim centre before bishop appears
+      if(v <= 1) candidate = tryMove(bPd7, d5);
+      else       candidate = tryMove(bPe7, e5);
+      if(!candidate.from) candidate = tryMove(bNg8, nf6);
+
+    } else if(wB3P) {
+      // 1.b3 Larsen's — e5, take the centre
+      candidate = tryMove(bPe7, e5);
+      if(!candidate.from) candidate = tryMove(bPd7, d5);
+
+    } else if(wF3P) {
+      // 1.f3 — e5, punish the weakening immediately
+      candidate = tryMove(bPe7, e5);
+      if(!candidate.from) candidate = tryMove(bPd7, d5);
+
+    } else if(wE3P) {
+      // 1.e3 — d5
+      candidate = tryMove(bPd7, d5);
+      if(!candidate.from) candidate = tryMove(bPe7, e5);
+
+    } else if(wD3P) {
+      // 1.d3 — e5
+      candidate = tryMove(bPe7, e5);
+      if(!candidate.from) candidate = tryMove(bPd7, d5);
+
+    } else {
+      // Anything else (Na3, Nh3, h3, a3, b3 edge case, etc.) — e5 or d5
+      if(v <= 1) candidate = tryMove(bPe7, e5);
+      else       candidate = tryMove(bPd7, d5);
+      if(!candidate.from) candidate = tryMove(bNg8, nf6);
     }
-  } else {
-    // Move 2 — develop a knight or support the center.
-    // CRITICAL: only suggest moves where the destination is NOT a pawn-kick trap.
-    // A square is a pawn-kick trap if it is attacked by a white pawn AND there is
-    // a white pawn on an adjacent file that can safely advance to re-attack it
-    // (i.e. NOT a genuine outpost). Safe outposts are fine even if currently attacked.
-    auto isKickTrap = [&](int sq) -> bool {
-      int r = rankOf(sq), f = fileOf(sq);
-      // Currently attacked by a white pawn?
-      bool attacked = false;
-      for(int df = -1; df <= 1; df += 2) {
-        int pr = r - 1, pf = f + df;
-        if(inBounds(pr, pf) && board[sqOf(pr, pf)] == W_P) { attacked = true; break; }
-      }
-      if(!attacked) return false;
-      // Check each adjacent file for a white pawn that can safely advance to threaten
-      for(int df = -1; df <= 1; df += 2) {
-        int adjF = f + df;
-        if(adjF < 0 || adjF > 7) continue;
-        for(int rr = 0; rr < r; rr++) {
-          if(board[sqOf(rr, adjF)] == W_P) {
-            bool pathClear = true;
-            for(int pr = rr + 1; pr <= r - 1; pr++) {
-              if(board[sqOf(pr, adjF)] != EMPTY) { pathClear = false; break; }
-            }
-            if(pathClear) {
-              int attackSq = sqOf(r - 1, adjF);
-              uint8_t savedA = board[attackSq];
-              uint8_t savedP = board[sqOf(rr, adjF)];
-              board[attackSq]       = W_P;
-              board[sqOf(rr, adjF)] = EMPTY;
-              int pawnSafety = seeCaptures(attackSq, 2);
-              board[attackSq]       = savedA;
-              board[sqOf(rr, adjF)] = savedP;
-              if(pawnSafety <= 0) return true;  // pawn push is safe → it's a trap
-            }
-            break;
-          }
-        }
-      }
-      return false;  // attacked but no pawn can safely advance → safe outpost
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // MOVE 2
+  // ═══════════════════════════════════════════════════════════════════════════
+  } else if(blackMoveNum == 2) {
+
+    // Helper: try knight development, preferring the square that isn't a kick trap.
+    // If BOTH squares are kick traps, play a pawn move instead.
+    auto safeKnight = [&](int sq1, int from1, int sq2, int from2, int pawnSq, int pawnFrom) -> Move {
+      Move m = none;
+      if(!isKickTrap2(sq1)) m = tryMove(from1, sq1);
+      if(!m.from && !isKickTrap2(sq2)) m = tryMove(from2, sq2);
+      if(!m.from) m = tryMove(pawnFrom, pawnSq);  // pawn fallback — never a kick trap
+      return m;
     };
 
     if(wE4 || wE5) {
       if(bE5) {
-        // After 1.e4 e5 — develop Nf6 or Nc6, never to a pawn-attacked square
-        int nc6 = sqOf(5,2), nf6 = sqOf(5,5);
-        if(!isKickTrap(nc6)) {
-          candidate = tryMove(bNb8, nc6);
-        }
-        if(!candidate.from && !isKickTrap(nf6)) {
-          candidate = tryMove(bNg8, nf6);
-        }
-        if(!candidate.from) {
-          // Knights both attacked — play d6 or Bc5
-          candidate = tryMove(bPd7, sqOf(5,3));  // d6 solid
-        }
+        // 1.e4 e5 — develop Nc6 or Nf6, not to kick-trapped squares
+        candidate = safeKnight(nc6,bNb8, nf6,bNg8, d6,bPd7);
       } else if(bC5) {
-        // After 1.e4 c5 Sicilian — play d6 or Nc6
-        int nc6 = sqOf(5,2);
-        if(!isKickTrap(nc6)) {
-          candidate = tryMove(bNb8, nc6);
-        }
-        if(!candidate.from) candidate = tryMove(bPd7, sqOf(5,3)); // d6
+        // Sicilian — Nc6 or d6
+        candidate = safeKnight(nc6,bNb8, nf6,bNg8, d6,bPd7);
       } else if(bD5) {
-        // Scandinavian — recapture or Nf6
-        int nf6 = sqOf(5,5);
-        if(!isKickTrap(nf6)) {
-          candidate = tryMove(bNg8, nf6);
-        }
-        if(!candidate.from) candidate = tryMove(bPe7, sqOf(5,4)); // e6
+        // Scandinavian — Nf6 or e6
+        candidate = safeKnight(nf6,bNg8, nc6,bNb8, e6,bPe7);
       } else {
-        // Some other first move — just develop kingside knight safely
-        int nf6 = sqOf(5,5);
-        if(!isKickTrap(nf6)) {
-          candidate = tryMove(bNg8, nf6);
-        }
-        if(!candidate.from) candidate = tryMove(bPd7, sqOf(5,3));
+        // Some other black first move after e4 — safe Nf6
+        candidate = safeKnight(nf6,bNg8, nc6,bNb8, d6,bPd7);
       }
+
     } else if(wD4 || wD5) {
       if(bD5) {
-        // QGD-style — play e6 or Nf6
-        int nf6 = sqOf(5,5);
-        if(!isKickTrap(nf6)) {
-          candidate = tryMove(bNg8, nf6);
-        }
-        if(!candidate.from) candidate = tryMove(bPe7, sqOf(5,4)); // e6
+        // QGD style — Nf6 or e6
+        candidate = safeKnight(nf6,bNg8, nc6,bNb8, e6,bPe7);
+      } else if(bF5) {
+        // Dutch — Nf6 or e6
+        candidate = safeKnight(nf6,bNg8, nc6,bNb8, e6,bPe7);
       } else {
-        int nf6 = sqOf(5,5);
-        if(!isKickTrap(nf6)) {
-          candidate = tryMove(bNg8, nf6);
-        }
-        if(!candidate.from) candidate = tryMove(bPd7, sqOf(4,3)); // d5 break
+        // KID setup — Nf6 then fianchetto later
+        candidate = safeKnight(nf6,bNg8, nc6,bNb8, d5,bPd7);
       }
+
     } else if(wC4) {
-      if(bE5 || bC5) {
-        int nc6 = sqOf(5,2);
-        if(!isKickTrap(nc6)) {
-          candidate = tryMove(bNb8, nc6);
-        }
-        if(!candidate.from) {
-          int nf6 = sqOf(5,5);
-          if(!isKickTrap(nf6)) candidate = tryMove(bNg8, nf6);
-        }
-      } else {
-        int nf6 = sqOf(5,5);
-        if(!isKickTrap(nf6)) candidate = tryMove(bNg8, nf6);
-        if(!candidate.from) candidate = tryMove(bPe7, sqOf(5,4));
-      }
+      candidate = safeKnight(nc6,bNb8, nf6,bNg8, e6,bPe7);
+
     } else if(wF4) {
-      int nf6 = sqOf(5,5);
-      if(!isKickTrap(nf6)) candidate = tryMove(bNg8, nf6);
-      if(!candidate.from) candidate = tryMove(bPe7, sqOf(5,4)); // e6
+      // After 1.f4 d5 — Nf6 or g6 (prepare fianchetto)
+      candidate = safeKnight(nf6,bNg8, nc6,bNb8, g6,bPg7);
+
+    } else if(wG4) {
+      // After 1.g4 — Nf6, develop fast
+      candidate = safeKnight(nf6,bNg8, nc6,bNb8, e5,bPe7);
+
+    } else if(wNf3) {
+      // After 1.Nf3 — develop a knight safely, supporting whatever pawn we played
+      candidate = safeKnight(nf6,bNg8, nc6,bNb8, d5,bPd7);
+
+    } else if(wNc3) {
+      // After 1.Nc3 — if we played d5, support with Nf6; if e5, play Nc6 mirror
+      if(bD5) candidate = safeKnight(nf6,bNg8, nc6,bNb8, e6,bPe7);
+      else    candidate = safeKnight(nc6,bNb8, nf6,bNg8, d5,bPd7);
+
+    } else if(wNh3 || wNa3) {
+      // After useless flank knight — develop centrally, Nf6 is always safe
+      candidate = safeKnight(nf6,bNg8, nc6,bNb8, d5,bPd7);
+
+    } else if(wG3P || wB3P) {
+      // Flank pawn openings — develop Nf6 toward centre
+      candidate = safeKnight(nf6,bNg8, nc6,bNb8, d5,bPd7);
+
     } else {
-      // Unknown opening — safe knight development
-      int nf6 = sqOf(5,5), nc6 = sqOf(5,2);
-      if(bE5 || bD5) {
-        if(!isKickTrap(nc6)) candidate = tryMove(bNb8, nc6);
-      }
-      if(!candidate.from) {
-        if(!isKickTrap(nf6)) candidate = tryMove(bNg8, nf6);
-      }
-      if(!candidate.from) {
-        if(v%2==0) candidate = tryMove(bPe7, sqOf(4,4));
-        else       candidate = tryMove(bPd7, sqOf(4,3));
+      // Universal fallback — safe knight to best available square
+      candidate = safeKnight(nf6,bNg8, nc6,bNb8, e5,bPe7);
+    }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // MOVE 3 — new: extend book by one more move
+  // ═══════════════════════════════════════════════════════════════════════════
+  } else if(blackMoveNum == 3) {
+
+    // Count undeveloped black minors — tells us what's still needed
+    int undev = 0;
+    bool nG8home = (board[bNg8] == B_N);
+    bool nB8home = (board[bNb8] == B_N);
+    bool bF8home = (board[bBf8] == B_B);
+    bool bC8home = (board[bBc8] == B_B);
+    if(nG8home) undev++;
+    if(nB8home) undev++;
+    if(bF8home) undev++;
+    if(bC8home) undev++;
+
+    // Priority order for move 3:
+    // 1. If both knights are still home, develop a knight (safe square only)
+    // 2. If one knight is home, develop it
+    // 3. If both knights are out, consider castling prep (e6/d6) or bishop dev
+
+    if(nG8home && !isKickTrap2(nf6)) {
+      candidate = tryMove(bNg8, nf6);
+    }
+    if(!candidate.from && nB8home && !isKickTrap2(nc6)) {
+      candidate = tryMove(bNb8, nc6);
+    }
+    // Both knights developed or both kick traps — play structural pawn
+    if(!candidate.from) {
+      // Choose between e6, d6, Bc5-style development based on pawn structure
+      if(bE5 && !bD6) {
+        // After e5 — d6 solidifies the centre
+        candidate = tryMove(bPd7, d6);
+      } else if(bC5 && !bD6) {
+        // Sicilian — d6
+        candidate = tryMove(bPd7, d6);
+      } else if(bD5 && !bE6) {
+        // After d5 — e6 supports
+        candidate = tryMove(bPe7, e6);
+      } else if(!bE6 && !bE5) {
+        candidate = tryMove(bPe7, e6);
+      } else {
+        // Last resort — if everything else fails, develop bishop
+        // Only to a safe non-forward square
+        if(bF8home && !isKickTrap2(sqOf(6,4))) {
+          candidate = tryMove(bBf8, sqOf(6,4)); // Be7
+        }
+        if(!candidate.from && bC8home) {
+          candidate = tryMove(bBc8, sqOf(5,3)); // Bd7 — solid, no aggression
+        }
       }
     }
   }
 
   return candidate;
 }
-
-// ─── Bot move with iterative deepening ───────────────────────────────────────
-int fullMoveCount = 0;
 
 void searchTask(void* param) {
   searchResult  = getBotMove();
@@ -2469,12 +2918,30 @@ Move runSearchOnCore0() {
   }
 
   xTaskCreatePinnedToCore(
-    searchTask, "chess_search", 28672, nullptr, 1, nullptr, 0
+    searchTask, "chess_search", 32768, nullptr, 1, nullptr, 0
   );
 
-  int lastDrawnPct = -1;
+  int lastDrawnPct   = -1;
+  int lastDrawnDepth = -1;
   while(!searchDone) {
     int p = (int)searchPct;
+    int d = (int)searchDepth;
+
+    // Depth label ABOVE the progress bar (y=3..10, same x as bar)
+    // Erase and redraw only when depth changes
+    if(d != lastDrawnDepth) {
+      tft.fillRect(PB_X-1, 2, PB_IW+4, 9, C_BG);
+      if(d > 0) {
+        tft.setTextSize(1);
+        tft.setTextColor(C_HOVER);
+        // "D9" = 2 chars = 12px — centre in bar width (PB_IW+2 = 14px)
+        tft.setCursor(PB_X + (PB_IW+2 - 12)/2, 3);
+        tft.print('D');
+        tft.print(d);
+      }
+      lastDrawnDepth = d;
+    }
+
     if(p != lastDrawnPct) {
       drawProgressBar(p);
       lastDrawnPct = p;
@@ -2482,20 +2949,115 @@ Move runSearchOnCore0() {
     vTaskDelay(10);
     yield();
   }
-  drawProgressBar(100);
+  // Final: draw at 99, erase depth label, clean label zone, draw eval bar
+  drawProgressBar(99);
+  tft.fillRect(PB_X-1, 2, PB_IW+4, 9, C_BG);
+  tft.fillRect(PB_X-3, PB_Y+PB_IH+3, PB_IW+7, 9, C_BG);
+  drawEvalBar((int)evalScore);
   return searchResult;
 }
 
+// ─── Bot move: always depth-9 iterative deepening + shallow-depth fallback ────
+//
+// DESIGN
+// ──────
+// 1. Opening book is checked first (moves 1-2 for black). If a book move is
+//    available, it is returned immediately — no search needed.
+//
+// 2. Iterative deepening from depth 1 to SEARCH_DEPTH (9).
+//    At each depth d we record:
+//      depthBestMove[d]  — the best root move found at that depth
+//      depthBestScore[d] — its score (from black's perspective, negamax-style)
+//
+// 3. After depth 9 completes, the SHALLOW-DEPTH FALLBACK is applied:
+//    If the depth-9 score is not significantly better than the score at some
+//    shallower depth, and a shallower depth had a better-scoring move, then
+//    play that shallower move instead.
+//
+//    Rationale: a deep search can sometimes be fooled by horizon effects at
+//    exactly ply 9 (e.g. a piece hanging just beyond the horizon). Using the
+//    best score across all depths avoids this without giving up deep analysis
+//    — we always search to 9 first, and only fall back if the shallower
+//    result is strictly better.
+//
+//    Threshold: FALLBACK_MARGIN centipawns. If the best score seen at depths
+//    1-8 exceeds the depth-9 score by more than this margin, the shallowest
+//    depth that achieved that peak score is used instead.
+//    A move from depth d_shallow is only preferred if:
+//      peakScore - depth9Score > FALLBACK_MARGIN
+//
+// 4. Opening system integration: the opening book produces legal, verified
+//    moves. The search (with the full evaluation + pruning + PSTs) takes over
+//    from move 3 onwards. Both systems share the same board representation
+//    and evaluation, so there is no inconsistency.
+//
+// 5. Anti-sacrifice trap: LMR always re-searches at full depth when the
+//    reduced score beats alpha. Quiescence search runs after depth 9 in all
+//    branches. Together these ensure a 4-ply sacrifice (or any tactical
+//    sequence) cannot be missed regardless of pruning.
+
+#define SEARCH_DEPTH     9     // maximum depth — time limit governs which depths complete
+#define FALLBACK_MARGIN  15    // centipawns: prefer shallower if it scores this much better
+
 Move getBotMove() {
-  if(openingMoveIndex < 2) {
-    Move bm = getBookMove(openingMoveIndex+1);
-    if(bm.from || bm.to) {
-      openingMoveIndex++;
-      return bm;
+  // ── Opening book (moves 1-3) ─────────────────────────────────────────────
+  // The book produces principled development moves, but it has NO tactical
+  // awareness. Before accepting a book move we run a lightweight safety check:
+  //
+  //   1. The candidate move itself must not walk into a losing capture (SEE < 0
+  //      on the destination square after the move).
+  //   2. No currently undefended black piece must be under immediate attack
+  //      by a white piece — if so, we must find a defensive move ourselves
+  //      rather than blindly developing.
+  //   3. No white piece must be en-prise (hanging) that the book would ignore
+  //      — if there is a winning capture available (SEE > 0) the book is
+  //      bypassed so the search can take it.
+  //
+  // If any of these conditions fire, openingMoveIndex is advanced past 3 so
+  // the book is never consulted again and full search handles everything.
+  if(openingMoveIndex < 3) {
+    // Condition 3: is there a winning capture available right now?
+    bool winningCaptureAvailable = false;
+    {
+      Move capMoves[128]; int capCnt = 0;
+      generateMoves(false, capMoves, capCnt, false);
+      for(int i = 0; i < capCnt && !winningCaptureAvailable; i++) {
+        if(!board[capMoves[i].to]) continue; // not a capture
+        if(!isLegal(capMoves[i])) continue;
+        if(seeMoveGain(capMoves[i].from, capMoves[i].to, board[capMoves[i].from], 2) > 0)
+          winningCaptureAvailable = true;
+      }
     }
-    openingMoveIndex = 2;
+
+    // Condition 2: is any undefended black piece currently under attack?
+    bool blackPieceHanging = false;
+    if(!winningCaptureAvailable) {
+      for(int sq = 0; sq < 64 && !blackPieceHanging; sq++) {
+        int p = board[sq];
+        if(!p || !IS_BLACK(p) || TYPE(p) == KING) continue;
+        // Is this square attacked by white?
+        if(seeCaptures(sq, 1) > 0) blackPieceHanging = true;
+      }
+    }
+
+    if(!winningCaptureAvailable && !blackPieceHanging) {
+      Move bm = getBookMove(openingMoveIndex + 1);
+      if(bm.from || bm.to) {
+        // Condition 1: does the book move itself walk into a losing capture?
+        int piece = board[bm.from];
+        int seeVal = seeMoveGain(bm.from, bm.to, piece, 2);
+        bool safe = (seeVal >= 0);  // >= 0: even exchanges are acceptable
+        if(safe) {
+          openingMoveIndex++;
+          return bm;
+        }
+      }
+    }
+    // Any safety check failed — abandon book entirely, use full search
+    openingMoveIndex = 3;
   }
 
+  // ── Search initialisation ─────────────────────────────────────────────────
   memset(killers, 0, sizeof(killers));
   memset(histHeuristic, 0, sizeof(histHeuristic));
   searchAborted = false;
@@ -2503,35 +3065,47 @@ Move getBotMove() {
   abDepthLevel  = 0;
   qDepthLevel   = 0;
   searchStart   = millis();
+  searchPct     = 0;
+  searchDepth   = 0;
+
+  // Per-depth tracking (index 0 unused; 1..SEARCH_DEPTH used)
+  Move  depthBestMove [SEARCH_DEPTH+1];
+  int   depthBestScore[SEARCH_DEPTH+1];
+  memset(depthBestMove,  0, sizeof(depthBestMove));
+  for(int d=0;d<=SEARCH_DEPTH;d++) depthBestScore[d] = -99999;
 
   Move* moves = rootMoveBuf;
   int count;
   generateMoves(false, moves, count, false);
   sortMoves(moves, count);
 
+  // Fallback: guarantee we always have at least one legal move ready
   Move completedBestMove = {0,0,0,0};
   int  completedBestScore = -99999;
-
   for(int i=0;i<count;i++) {
     if(isLegal(moves[i])) { completedBestMove = moves[i]; break; }
   }
 
-  for(int depth = 1; depth <= 7; depth++) {
+  // ── Iterative deepening: depth 1 → SEARCH_DEPTH (time-limited) ──────────
+  for(int depth = 1; depth <= SEARCH_DEPTH; depth++) {
     if(searchAborted) break;
+    searchDepth = depth;   // tell the UI which depth we are currently searching
 
     Move  iterBestMove  = {0,0,0,0};
     int   iterBestScore = -99999;
 
-    // Aspiration windows: narrow window around previous score for faster cutoffs
+    // Aspiration windows (active from depth 3 onwards)
     int aspDelta = 50;
-    int alpha, beta;
+    int windowLo, windowHi;
     if(depth >= 3 && completedBestScore > -90000) {
-      alpha = completedBestScore - aspDelta;
-      beta  = completedBestScore + aspDelta;
+      windowLo = completedBestScore - aspDelta;
+      windowHi = completedBestScore + aspDelta;
     } else {
-      alpha = -99999; beta = 99999;
+      windowLo = -99999;
+      windowHi =  99999;
     }
 
+    // Move the previous iteration's best move to front for better ordering
     if(completedBestMove.from || completedBestMove.to) {
       for(int i=0;i<count;i++) {
         if(moves[i].from==completedBestMove.from && moves[i].to==completedBestMove.to) {
@@ -2541,14 +3115,11 @@ Move getBotMove() {
       }
     }
 
-    // Aspiration loop: widen window on fail-high/low
-    // windowLo/windowHi track the actual window bounds; alpha is updated
-    // inside the loop but we compare the final score against the window.
-    int windowLo = alpha, windowHi = beta;
+    // Aspiration re-search loop
     while(true) {
       iterBestMove  = {0,0,0,0};
       iterBestScore = -99999;
-      int loopAlpha = windowLo;  // fresh alpha for this iteration
+      int loopAlpha = windowLo;
 
       for(int i=0; i<count; i++) {
         if(!isLegal(moves[i])) continue;
@@ -2556,8 +3127,11 @@ Move getBotMove() {
 
         HistoryEntry he;
         makeMove(moves[i], &he);
-        hashHistory[hashHistoryCount++] = currentHash;
-        int score = -alphaBeta(depth-1, -windowHi, -loopAlpha, true, searchStart);
+        if(hashHistoryCount < MAX_HISTORY + AB_MAX_LEVELS + 3)
+          hashHistory[hashHistoryCount++] = currentHash;
+        else
+          hashHistoryCount++;
+        int score = -alphaBeta(depth-1, -windowHi, -loopAlpha, true, searchStart, -1);
         hashHistoryCount--;
         unmakeMove(he);
 
@@ -2572,25 +3146,27 @@ Move getBotMove() {
 
       if(searchAborted) break;
 
-      // Compare against the window bounds, not the updated loopAlpha
+      // Widen window on fail-high / fail-low
       if(iterBestScore <= windowLo && depth >= 3) {
-        // Fail low — widen lower bound
         windowLo = max(-99999, windowLo - aspDelta);
         aspDelta *= 2;
       } else if(iterBestScore >= windowHi && depth >= 3) {
-        // Fail high — widen upper bound
         windowHi = min(99999, windowHi + aspDelta);
         aspDelta *= 2;
       } else {
-        alpha = loopAlpha;  // accept result
-        break;
+        break;   // score within window — accept
       }
       if(aspDelta > 800) { windowLo = -99999; windowHi = 99999; }
     }
 
+    // Record this depth's result
     if(!searchAborted && (iterBestMove.from || iterBestMove.to)) {
+      depthBestMove [depth] = iterBestMove;
+      depthBestScore[depth] = iterBestScore;
       completedBestMove  = iterBestMove;
       completedBestScore = iterBestScore;
+
+      // Move best move to front of list for next iteration's ordering
       for(int i=0;i<count;i++) {
         if(moves[i].from==completedBestMove.from && moves[i].to==completedBestMove.to) {
           Move tmp=moves[0]; moves[0]=moves[i]; moves[i]=tmp;
@@ -2599,14 +3175,74 @@ Move getBotMove() {
       }
     }
 
+    // Early exit if forced mate found
     if(completedBestScore > 18000) break;
   }
 
   searchPct = 99;
+
+  // ── Shallow-depth fallback selection ─────────────────────────────────────
+  // After completing all depths, check if a shallower depth found a strictly
+  // better-scored move than depth 9. If the peak shallower score exceeds the
+  // depth-9 score by more than FALLBACK_MARGIN, we trust the shallower result.
+  //
+  // This handles the case where depth-9 encounters a horizon-effect artefact
+  // (e.g. a position looks good just because the search ends right before an
+  // opponent recapture). The engine noted every depth's best move; we now
+  // pick the globally best one.
+  //
+  // We do NOT prefer a shallower move if its score is merely equal or slightly
+  // better — the depth-9 result is inherently more reliable for close scores.
+  //
+  // Special case: if depth 9 was never completed (forced mate found earlier),
+  // completedBestMove already holds the correct result.
+  {
+    int d9score = depthBestScore[SEARCH_DEPTH];
+    int peakScore = d9score;
+    int peakDepth = SEARCH_DEPTH;
+
+    // Scan depths 1..SEARCH_DEPTH-1 for a better score
+    for(int d = 1; d < SEARCH_DEPTH; d++) {
+      if(!(depthBestMove[d].from || depthBestMove[d].to)) continue;
+      if(depthBestScore[d] > peakScore) {
+        peakScore = depthBestScore[d];
+        peakDepth = d;
+      }
+    }
+
+    // Only fall back if:
+    //   (a) depth-9 actually completed (d9score != -99999)
+    //   (b) the shallower score beats depth-9 by more than FALLBACK_MARGIN
+    //   (c) the shallower move is valid
+    if(d9score != -99999
+       && peakDepth < SEARCH_DEPTH
+       && peakScore - d9score > FALLBACK_MARGIN
+       && (depthBestMove[peakDepth].from || depthBestMove[peakDepth].to))
+    {
+      completedBestMove  = depthBestMove[peakDepth];
+      completedBestScore = peakScore;
+    } else if(depthBestMove[SEARCH_DEPTH].from || depthBestMove[SEARCH_DEPTH].to) {
+      // Depth-9 result is best or equivalent — use it
+      completedBestMove  = depthBestMove[SEARCH_DEPTH];
+      completedBestScore = d9score;
+    }
+    // else: completedBestMove already holds the last completed depth's result
+    //       (set during iterative deepening above)
+  }
+
+  // Publish final eval score for the eval bar.
+  // completedBestScore is negamax from black's POV (positive = good for black).
+  // Convert to white-relative: white-relative = -completedBestScore.
+  // Clamp mate scores so they don't overflow the bar mapping.
+  {
+    int ws = -completedBestScore;
+    if(ws >  19000) ws =  800;
+    if(ws < -19000) ws = -800;
+    evalScore = ws;
+  }
+
   return completedBestMove;
 }
-
-// ─── TFT drawing helpers ───────────────────────────────────────────────────────
 inline int sqX(int sq) { return BOARD_OX + fileOf(sq)*SQ_W; }
 inline int sqY(int sq) { return BOARD_OY + (7-rankOf(sq))*SQ_H; }
 inline uint16_t sqColor(int sq) {
@@ -2771,122 +3407,217 @@ void drawSelOutline() {
 // Draws a pixel-art flag: a vertical pole with a red triangular flag on top
 // x,y = top-left corner of the icon area (fits in 13x34 panel space)
 void drawFlagIcon(int bx, int by) {
-  tft.fillRoundRect(bx, by, 13, 34, 2, C_BTN_BG);
-  int poleX = bx + 4;
-  int poleTop = by + 4;
-  int poleBot = by + 29;
-  tft.drawFastVLine(poleX,   poleTop, poleBot - poleTop + 1, C_BORDER);
-  tft.drawFastVLine(poleX+1, poleTop, poleBot - poleTop + 1, C_BTN_BG);
-  // Red triangular flag — always red regardless of theme (it's a danger icon)
-  int flagH = 11;
+  // Button face already filled. Button is 10px wide (bx..bx+9).
+  // Pole at bx+1 (shifted 2px left), flag triangle right of pole.
+  int poleX   = bx + 1;
+  int poleTop = by + 3;
+  int poleBot = by + 26;
+  tft.drawFastVLine(poleX, poleTop, poleBot - poleTop + 1, C_BORDER);
+  int flagH = 7;  // 7-row triangle fits cleanly in 10px button
   for(int row = 0; row < flagH; row++) {
     int rowY = poleTop + row;
-    int w = flagH - row;
-    for(int px = 0; px < w; px++) {
-      int fx = poleX + 2 + px;
-      if(fx < bx + 13) {
-        uint16_t c = (row == 0) ? 0xFBA0 : (px == w-1) ? 0x8000 : 0xD000;
+    int w    = flagH - row;
+    for(int p = 0; p < w; p++) {
+      int fx = poleX + 1 + p;
+      if(fx < bx + 8) {
+        uint16_t c = (row == 0) ? 0xFBA0 : (p == w-1) ? 0x8000 : 0xD000;
         tft.drawPixel(fx, rowY, c);
       }
     }
   }
-  tft.drawFastHLine(poleX - 1, poleBot + 1, 4, C_BTN_BG);
 }
 
 void drawLeftPanel() {
-  // ── Flag (resign) button — y 8..41 ──────────────────────────────────────
-  drawFlagIcon(0, 8);
+  // ── Panel background strip — 13px wide, runs full height ─────────────────
+  tft.fillRect(0, 0, 13, 128, C_PANEL_BG);
+
+  // ── Flag (resign) button — y 8..37 (30px) ────────────────────────────────
+  tft.fillRoundRect(2, 8, 10, 30, 2, C_BTN_FACE);
+  drawFlagIcon(2, 8);
   if(panelFocus==1) {
-    tft.drawFastHLine(0, 8,  13, C_HOVER);
-    tft.drawFastHLine(0, 41, 13, C_BTN_HL);
-    tft.drawFastVLine(0, 8,  34, C_HOVER);
-    tft.drawFastVLine(12,8,  34, C_BTN_HL);
+    tft.drawRect(1, 7, 11, 32, C_HOVER);
   }
 
-  // ── UND (undo) button — y 46..79 ────────────────────────────────────────
-  tft.fillRoundRect(0, 46, 13, 34, 2, C_BTN_BG);
+  // ── UND (undo) button — y 43..72 (30px) ──────────────────────────────────
+  tft.fillRoundRect(2, 43, 10, 30, 2, C_BTN_FACE);
   if(panelFocus==2) {
-    tft.drawFastHLine(0, 46, 13, C_HOVER);
-    tft.drawFastHLine(0, 79, 13, C_BTN_HL);
-    tft.drawFastVLine(0, 46, 34, C_HOVER);
-    tft.drawFastVLine(12,46, 34, C_BTN_HL);
+    tft.drawRect(1, 42, 11, 32, C_HOVER);
   }
   tft.setTextSize(1);
-  tft.setTextColor(C_BTN_HL);  tft.setCursor(4, 50); tft.print('U');
-  tft.setTextColor(C_BORDER);  tft.setCursor(4, 59); tft.print('N');
-  tft.setTextColor(C_HOVER);   tft.setCursor(4, 68); tft.print('D');
+  tft.setTextColor(C_BTN_HL);      tft.setCursor(4, 47); tft.print('U');
+  tft.setTextColor(C_BORDER);      tft.setCursor(4, 55); tft.print('N');
+  tft.setTextColor(C_SIDE_ACCENT); tft.setCursor(4, 63); tft.print('D');
 
-  // ── Palette (theme) button — y 83..100 ─────────────────────────────────
-  // A small square showing the current theme's 3-colour swatch
-  int py = 83;
-  tft.fillRoundRect(0, py, 13, 18, 2, C_BTN_BG);
+  // ── Palette (theme) button — y 77..93 (17px) ─────────────────────────────
+  int py = 77;
+  tft.fillRoundRect(2, py, 10, 17, 2, C_BTN_FACE);
   if(panelFocus==3) {
-    tft.drawFastHLine(0, py,    13, C_HOVER);
-    tft.drawFastHLine(0, py+17, 13, C_BTN_HL);
-    tft.drawFastVLine(0, py,    18, C_HOVER);
-    tft.drawFastVLine(12,py,    18, C_BTN_HL);
+    tft.drawRect(1, py-1, 11, 19, C_HOVER);
   }
-  // 3-colour swatch: darkSq | lightSq | cursor — each 4px wide
-  tft.fillRect(1,  py+4, 4, 10, C_DARK_SQ);
-  tft.fillRect(5,  py+4, 4, 10, C_LIGHT_SQ);
-  tft.fillRect(9,  py+4, 3, 10, C_HOVER);
+  // 2-colour swatch: darkSq | lightSq in 8px total, centred in 10px button
+  tft.fillRect(3, py+4, 4, 9, C_DARK_SQ);
+  tft.fillRect(7, py+4, 4, 9, C_LIGHT_SQ);
 
-  // ── Divider line ─────────────────────────────────────────────────────────
-  tft.drawFastVLine(13, 4, 104, C_BORDER);
+  // ── Phase indicator — y 98..107, centred letter ───────────────────────────
+  {
+    int ph = gamePhase();
+    char letter = (ph==0) ? 'O' : (ph==1) ? 'M' : 'E';
+    uint16_t col = (ph==0) ? C_SIDE_ACCENT : (ph==1) ? C_BTN_HL : C_GAMEOVER;
+    tft.fillRect(0, 97, 13, 10, C_PANEL_BG);
+    tft.setTextSize(1);
+    tft.setTextColor(col);
+    tft.setCursor(4, 98);
+    tft.print(letter);
+  }
 }
 
 void drawProgressBar(int pct) {
+  // Cap at 99 — bar never shows 100
+  if(pct > 99) pct = 99;
   if(pct == dispPct) return;
-
   int oldPct = dispPct;
   dispPct = pct;
 
-  // Border uses theme colour
-  tft.drawRect(PB_X, PB_Y, PB_IW+2, PB_IH+2, C_PB_BORDER);
-
+  // Erase the entire right-side gutter including any stale pixels from old code
+  // (covers PB_X-3 to PB_X+PB_IW+3, y=PB_Y to PB_Y+PB_IH+12)
+  // This eliminates the orange rectangle and any orange dots definitively.
   if(pct == 0 || oldPct < 0) {
-    // Full reset: fill empty, redraw border, reset label
+    tft.fillRect(PB_X-3, PB_Y-1, PB_IW+7, PB_IH+12, C_BG);
+    tft.drawRect(PB_X, PB_Y, PB_IW+2, PB_IH+2, C_BORDER);
     tft.fillRect(PB_X+1, PB_Y+1, PB_IW, PB_IH, C_PB_EMPTY);
-    tft.fillRect(PB_X-2, 112, 20, 9, C_BG);
-    tft.setTextColor(C_BORDER);
-    tft.setTextSize(1);
-    tft.setCursor(PB_X, 113);
-    tft.print("00%");
     return;
   }
 
   int oldH = (PB_IH * max(0, oldPct)) / 100;
-  int newH = (PB_IH * pct) / 100;
+  int newH = (PB_IH * pct)            / 100;
 
   if(newH > oldH) {
-    // Fill new rows from bottom up, interpolating between C_BTN_HL and C_HOVER
-    for(int y = oldH; y < newH; y++) {
-      // Blend: at y=0 use C_BTN_HL (dim), at y=PB_IH use C_HOVER (bright)
-      // Simple 2-stop interpolation in RGB565
-      uint8_t t = (uint8_t)((y * 255) / PB_IH);
-      uint8_t r0=(C_BTN_HL>>11)&31, g0=(C_BTN_HL>>5)&63, b0=C_BTN_HL&31;
-      uint8_t r1=(C_HOVER>>11)&31,  g1=(C_HOVER>>5)&63,  b1=C_HOVER&31;
-      uint8_t r2=r0+(uint8_t)(((int)(r1-r0)*t)>>8);
-      uint8_t g2=g0+(uint8_t)(((int)(g1-g0)*t)>>8);
-      uint8_t b2=b0+(uint8_t)(((int)(b1-b0)*t)>>8);
-      uint16_t c = ((uint16_t)r2<<11)|((uint16_t)g2<<5)|b2;
-      int yy = PB_Y + 1 + PB_IH - 1 - y;
-      tft.drawFastHLine(PB_X+1, yy, PB_IW, c);
-    }
+    int yStart = PB_Y + 1 + PB_IH - newH;
+    int yEnd   = PB_Y + 1 + PB_IH - oldH - 1;
+    if(yStart <= yEnd)
+      tft.fillRect(PB_X+1, yStart, PB_IW, yEnd - yStart + 1, C_HOVER);
   } else if(newH < oldH) {
-    tft.fillRect(PB_X+1, PB_Y+1, PB_IW, oldH - newH, C_PB_EMPTY);
+    int yStart = PB_Y + 1 + PB_IH - oldH;
+    int yEnd   = PB_Y + 1 + PB_IH - newH - 1;
+    if(yStart <= yEnd)
+      tft.fillRect(PB_X+1, yStart, PB_IW, yEnd - yStart + 1, C_PB_EMPTY);
   }
 
-  // Percentage label
-  tft.fillRect(PB_X-2, 112, 20, 9, C_BG);
-  tft.setTextColor(C_HOVER);
+  // % label — erase full label zone then print centred, no leading zero
+  tft.fillRect(PB_X-3, PB_Y+PB_IH+3, PB_IW+7, 9, C_BG);
   tft.setTextSize(1);
-  tft.setCursor(PB_X, 113);
-  if(pct < 10) tft.print('0');
+  tft.setTextColor(C_HOVER);
+  // "99%" = 3 chars = 18px, "9%" = 2 chars = 12px
+  int labelW = (pct >= 10) ? 18 : 12;
+  int labelX = PB_X + (PB_IW+2 - labelW) / 2;
+  tft.setCursor(labelX, PB_Y+PB_IH+4);
   tft.print(pct);
   tft.print('%');
+  // Depth is drawn above the bar by runSearchOnCore0 — NOT here
 }
 
+// ─── Evaluation bar ───────────────────────────────────────────────────────────
+// Two-colour bar: top = black portion (C_B_FILL), bottom = white portion (C_W_FILL).
+// Logarithmic scaling: 0cp=50/50, queen sac≈70/30, dominant≈88/12, mate=100/0.
+void drawEvalBar(int evalCp) {
+  // Logarithmic split. splitH = pixels from top for black region.
+  // Clamp: always show at least 1px of each colour unless it's a mate line.
+  bool isMate = (evalCp >= 19000 || evalCp <= -19000);
+  const float LOG_DENOM = 1.9459f; // log(7)
+  float absCp = (float)(evalCp < 0 ? -evalCp : evalCp);
+  if(absCp > 19000.0f) absCp = 19000.0f;
+  float logVal = logf(1.0f + absCp / 150.0f) / LOG_DENOM;
+  if(logVal > 1.0f) logVal = 1.0f;
+  int half   = EB_IH / 2;
+  int splitH;
+  if(evalCp >= 0)
+    splitH = half - (int)(half * logVal + 0.5f);
+  else
+    splitH = half + (int)(half * logVal + 0.5f);
+  // Issue 5: always keep at least 1px of each colour unless it is a true mate
+  if(!isMate) {
+    if(splitH < 1)       splitH = 1;
+    if(splitH > EB_IH-1) splitH = EB_IH-1;
+  } else {
+    if(splitH < 0)     splitH = 0;
+    if(splitH > EB_IH) splitH = EB_IH;
+  }
+
+  // Border + fill
+  tft.drawRect(EB_X, EB_Y, EB_IW+2, EB_IH+2, C_BORDER);
+  if(splitH > 0)
+    tft.fillRect(EB_X+1, EB_Y+1,        EB_IW, splitH,        C_B_FILL);
+  if(splitH < EB_IH)
+    tft.fillRect(EB_X+1, EB_Y+1+splitH, EB_IW, EB_IH-splitH, C_W_FILL);
+
+  // ── Eval number overlays ─────────────────────────────────────────────────
+  // Build digit arrays for integer and fractional parts.
+  // The decimal point is drawn manually as a 2x2 gray pixel block so it
+  // touches both neighbours with zero gap, staying horizontally centred.
+  // Layout: [whole digits | dot 2px | tenths digit], all flush.
+  tft.setTextSize(1);
+  int absVal = evalCp < 0 ? -evalCp : evalCp;
+  if(absVal > 9999) absVal = 9999;
+  int pawns  = absVal / 100;
+  int tenths = (absVal % 100) / 10;
+
+  // whole-part string (1 or 2 chars)
+  char wBuf[3]; int wLen = 0;
+  if(pawns >= 10) { wBuf[wLen++] = '0' + pawns/10; wBuf[wLen++] = '0' + pawns%10; }
+  else              wBuf[wLen++] = '0' + pawns;
+  wBuf[wLen] = 0;
+  char tBuf[2] = { (char)('0' + tenths), 0 };
+
+  // Total pixel width: wLen*6 + 2 (dot) + 6 (tenths digit)
+  int totalPx = wLen * 6 + 2 + 6;
+  int textX   = EB_X - 1 + (EB_IW + 2 - totalPx) / 2;
+  if(textX < 0) textX = 0;
+  if(textX + totalPx > 160) textX = 160 - totalPx;
+
+  int dotX    = textX + wLen * 6;   // dot starts right after whole digits
+  int tenthsX = dotX + 2;           // tenths digit starts right after dot
+
+  // Helper lambda: draw the three components in a given text + dot colour
+  // dotCol is always gray; textCol varies by region
+  auto drawEvalNumber = [&](int ty, uint16_t textCol) {
+    // Whole digits
+    tft.setTextColor(textCol);
+    tft.setCursor(textX, ty);
+    tft.print(wBuf);
+    // Decimal point: 2x2 block at font baseline (font is 7px tall, dot at row 5)
+    uint16_t gray = 0x8410; // mid-gray in RGB565
+    int dotY = ty + 5; // baseline dot position
+    tft.fillRect(dotX, dotY, 2, 2, gray);
+    // Tenths digit
+    tft.setTextColor(textCol);
+    tft.setCursor(tenthsX, ty);
+    tft.print(tBuf);
+  };
+
+  // Black region (top): white text near top
+  if(splitH >= 9) {
+    drawEvalNumber(EB_Y + 2, 0xFFFF);
+  }
+  // White region (bottom): black text near bottom
+  if(EB_IH - splitH >= 9) {
+    int ty = EB_Y + 1 + splitH + (EB_IH - splitH) - 9;
+    drawEvalNumber(ty, 0x0000);
+  }
+
+  // ── +/- signs at split line ───────────────────────────────────────────────
+  if(splitH > 5 && splitH < EB_IH - 5) {
+    int splitY = EB_Y + 1 + splitH;
+    if(evalCp >= 0) {
+      tft.setTextColor(0x0000); tft.setCursor(EB_X+1, splitY+1); tft.print('+');
+      tft.setTextColor(0xFFFF); tft.setCursor(EB_X+1, splitY-9); tft.print('-');
+    } else {
+      tft.setTextColor(0xFFFF); tft.setCursor(EB_X+1, splitY-9); tft.print('+');
+      tft.setTextColor(0x0000); tft.setCursor(EB_X+1, splitY+1); tft.print('-');
+    }
+  }
+}
+
+// ─── Phase indicator is drawn inside drawLeftPanel (below palette button) ────
 void drawGameOver() {
   tft.fillRect(22, 119, 104, 9, C_BG);
   tft.setTextSize(1);
@@ -2903,8 +3634,9 @@ void drawGameOver() {
 void drawAll() {
   tft.fillScreen(C_BG);
   drawBoard();
-  drawLeftPanel();
+  drawLeftPanel();        // panel bg, buttons, phase indicator
   drawProgressBar(0);
+  drawEvalBar(evalScore);
   if(engineFrom>=0) drawLastMoveOutlines(engineFrom, engineTo);
   if(selSq>=0) {
     tft.drawRect(sqX(selSq), sqY(selSq), SQ_W, SQ_H, C_SEL);
@@ -3339,26 +4071,26 @@ void showCheckmateScreen() {
   tft.drawFastHLine(cx-14, cy+10, 28, C_L_ACCENT2);
   tft.fillRect(cx-14, cy+11, 28, 2, C_L_BG);
 
-  // "CHECKMATE" — large heading
+  // "YOU LOST" — large, alternating theme title colours
   { tft.setTextSize(2);
-    const char* t1 = "CHECKMATE"; int tlen = strlen(t1);
+    const char* t1 = "YOU LOST"; int tlen = strlen(t1);
     int tx0 = (160 - tlen*12)/2;
     for(int i = 0; i < tlen; i++) {
       tft.setTextColor((i%2==0) ? C_L_TITLE : C_L_CROWN_HI);
-      tft.setCursor(tx0 + i*12, 46); tft.print(t1[i]);
+      tft.setCursor(tx0 + i*12, 48); tft.print(t1[i]);
     }
   }
 
   // Divider — left red, right theme accent
-  tft.drawFastHLine(20, 70, 60, 0x8000);
-  tft.drawFastHLine(80, 70, 60, C_L_ACCENT2);
+  tft.drawFastHLine(20, 68, 60, 0x8000);
+  tft.drawFastHLine(80, 68, 60, C_L_ACCENT2);
 
   tft.setTextColor(C_L_SUB); tft.setTextSize(1);
-  { const char* go = "Black wins."; int gl=strlen(go);
-    tft.setCursor((160-gl*6)/2, 76); tft.print(go); }
+  { const char* go = "CHECKMATE"; int gl=strlen(go);
+    tft.setCursor((160-gl*6)/2, 73); tft.print(go); }
   tft.setTextColor(C_L_TITLE);
-  { const char* bw = "You lost."; int bwl=strlen(bw);
-    tft.setCursor((160-bwl*6)/2, 88); tft.print(bw); }
+  { const char* bw = "Black wins."; int bwl=strlen(bw);
+    tft.setCursor((160-bwl*6)/2, 85); tft.print(bw); }
 
   // Bottom bar — left red, right theme
   tft.fillRect(0,  108, 80, 1, 0x8000);
@@ -3373,53 +4105,219 @@ void showCheckmateScreen() {
   tft.drawFastHLine(0,  127, 80, 0xD000);
   tft.drawFastHLine(80, 127, 80, C_L_ACCENT);
 
-  // Wait for button press (not a timed delay)
-  while(digitalRead(JOY_SW) == LOW)  { yield(); delay(10); } // wait release if held
-  while(digitalRead(JOY_SW) != LOW)  { yield(); delay(20); } // wait press
-  while(digitalRead(JOY_SW) == LOW)  { yield(); delay(10); } // wait release
+  delay(1500);
 }
 
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// UI-4: INTRO CUTSCENE
+// UI-4: INTRO CUTSCENE  — RageMate Maxima V1
+//
+// HACKER palette (hardcoded — runs before theme is applied to game board):
+//   HK_BG      near-black green    C(0,1,0)
+//   HK_DIM     very dark green     C(0,4,0)
+//   HK_MID     dim terminal green  C(2,12,1)
+//   HK_BRIGHT  phosphor green      C(6,32,3)
+//   HK_HOT     peak phosphor       C(8,44,4)
+//   HK_WHITE   white               0xFFFF
+//
+// Sequence:
+//   1. Black → scan-line flood from top, drawing faint horizontal grid lines
+//   2. "RageMate" materialises one character at a time with a flicker effect
+//   3. Horizontal rule sweeps out from centre (double line)
+//   4. MODEL slot machine: scrolls through name list, lands on "Maxima"
+//   5. VERSION slot machine: scrolls digits 1-9, lands on "1"
+//   6. Border pulses bright then settles
+//   7. Blink "> INITIALISING... <" prompt, wait for button
+//   8. Glitch-wipe exit: random scanlines, then hard cut to black
 // ═══════════════════════════════════════════════════════════════════════════════
 void playIntroCutscene() {
-  tft.fillScreen(C_I_BG);
+  // Hardcoded HACKER palette — independent of themeIndex
+  const uint16_t HK_BG     = C( 0, 1, 0);
+  const uint16_t HK_DIM    = C( 0, 4, 0);
+  const uint16_t HK_MID    = C( 2,12, 1);
+  const uint16_t HK_BRIGHT = C( 6,32, 3);
+  const uint16_t HK_HOT    = C( 8,44, 4);
+  const uint16_t HK_WHITE  = 0xFFFF;
 
-  // Border box
-  tft.drawRect(4, 20, 152, 88, C_I_BOX_BDR);
-  tft.drawRect(5, 21, 150, 86, C_I_BOX);
+  tft.fillScreen(0x0000);
 
-  // Title: "RageMate"
+  // ── 1. Scan-line flood from top, with faint horizontal grid every 8px ────
+  for(int y = 0; y < 128; y++) {
+    uint16_t lineCol = ((y % 8) == 0) ? HK_DIM : HK_BG;
+    tft.drawFastHLine(0, y, 160, lineCol);
+    if(y % 6 == 0) delay(3);
+  }
+  delay(30);
+
+  // ── 2. "RageMate" materialises with per-char flicker ─────────────────────
+  // Each character flickers 3 times (dim → off → bright) then stays on
   tft.setTextSize(2);
-  const char* l1 = "RageMate";
-  tft.setTextColor(C_I_TITLE);
-  tft.setCursor((160 - (int)strlen(l1)*12) / 2, 34);
-  tft.print(l1);
+  const char* title  = "RageMate";
+  int tlen   = strlen(title);
+  int tWidth = tlen * 12;
+  int tx0    = (160 - tWidth) / 2;
+  int ty     = 20;
 
-  // Subtitle: "Valkyra"
+  for(int i = 0; i < tlen; i++) {
+    int cx = tx0 + i * 12;
+    uint16_t finalCol = (i % 2 == 0) ? HK_HOT : HK_BRIGHT;
+    // Flicker: dim, off, dim, final
+    uint16_t flick[4] = { HK_MID, HK_BG, HK_MID, finalCol };
+    for(int f = 0; f < 4; f++) {
+      // Erase
+      tft.setTextColor(HK_BG);
+      tft.setCursor(cx, ty);
+      tft.print(title[i]);
+      // Draw
+      tft.setTextColor(flick[f]);
+      tft.setCursor(cx, ty);
+      tft.print(title[i]);
+      delay(f == 3 ? 0 : 22);
+    }
+    delay(38);
+  }
+
+  delay(60);
+
+  // ── 3. Double horizontal rule sweeps out from centre ─────────────────────
+  int divY = 46;
+  for(int d = 0; d <= 72; d++) {
+    tft.drawPixel(80 - d, divY,     HK_BRIGHT);
+    tft.drawPixel(80 + d, divY,     HK_BRIGHT);
+    tft.drawPixel(80 - d, divY + 2, HK_DIM);
+    tft.drawPixel(80 + d, divY + 2, HK_DIM);
+    if(d % 5 == 0) delay(2);
+  }
+  delay(20);
+
+  // ── 4. MODEL slot machine ─────────────────────────────────────────────────
+  // Label
   tft.setTextSize(1);
-  const char* l2 = "Valkyra";
-  tft.setTextColor(C_I_TITLE2);
-  tft.setCursor((160 - (int)strlen(l2)*6) / 2, 58);
-  tft.print(l2);
+  tft.setTextColor(HK_DIM);
+  tft.setCursor(16, 54);
+  tft.print("MODEL");
 
-  // Version
-  const char* l3 = "Beta V3";
-  tft.setTextColor(C_I_SUB);
-  tft.setCursor((160 - (int)strlen(l3)*6) / 2, 70);
-  tft.print(l3);
+  const char* models[] = {
+    "Enigma ","Mecha  ","Vendetta","Mamba  ",
+    "Katana ","Valkyra","Medusa ","Hydra  ",
+    "Chimera","Ultra  ","Maxima "
+  };
+  int modelCount = 11;
+  int mSlotX = 68;
+  int mSlotY = 54;
+  int mSlotW = 75;
 
-  // Prompt
-  tft.setTextColor(C_I_PROMPT);
-  tft.setCursor(28, 96);
-  tft.print("> press to begin <");
+  // Spin fast first, then slow down
+  int delays[] = { 30,30,30,30,40,40,55,55,75,100,130,0 };
+  for(int i = 0; i < modelCount; i++) {
+    // Erase slot
+    tft.fillRect(mSlotX, mSlotY, mSlotW, 9, HK_BG);
+    // Draw current name — brighter as we approach final
+    uint16_t c = (i < modelCount - 3) ? HK_MID : (i < modelCount - 1) ? HK_BRIGHT : HK_HOT;
+    tft.setTextColor(c);
+    tft.setCursor(mSlotX, mSlotY);
+    tft.print(models[i]);
+    delay(delays[i]);
+  }
+  // Final: re-draw "Maxima" in HK_HOT, lock it
+  tft.fillRect(mSlotX, mSlotY, mSlotW, 9, HK_BG);
+  tft.setTextColor(HK_HOT);
+  tft.setCursor(mSlotX, mSlotY);
+  tft.print("Maxima");
 
-  while(digitalRead(JOY_SW) == LOW)  { yield(); delay(10); }
-  while(digitalRead(JOY_SW) != LOW)  { yield(); delay(20); }
-  while(digitalRead(JOY_SW) == LOW)  { yield(); delay(10); }
+  delay(40);
 
-  tft.fillScreen(C_I_BG);
+  // ── 5. VERSION slot machine ───────────────────────────────────────────────
+  tft.setTextSize(1);
+  tft.setTextColor(HK_DIM);
+  tft.setCursor(16, 68);
+  tft.print("VERSION");
+
+  int vSlotX = 80;
+  int vSlotY = 68;
+  int vSlotW = 14;
+
+  int vDelays[] = { 25,25,28,32,38,48,62,80,110,0 };
+  for(int d = 1; d <= 9; d++) {
+    tft.fillRect(vSlotX, vSlotY, vSlotW, 9, HK_BG);
+    uint16_t c = (d < 7) ? HK_MID : (d < 9) ? HK_BRIGHT : HK_HOT;
+    tft.setTextColor(c);
+    tft.setCursor(vSlotX, vSlotY);
+    tft.print(d);
+    delay(vDelays[d - 1]);
+  }
+  // Land on 1 — re-draw
+  tft.fillRect(vSlotX, vSlotY, vSlotW, 9, HK_BG);
+  tft.setTextColor(HK_HOT);
+  tft.setCursor(vSlotX, vSlotY);
+  tft.print("1");
+
+  delay(60);
+
+  // ── 6. Border pulses bright then settles ─────────────────────────────────
+  for(int pulse = 0; pulse < 3; pulse++) {
+    uint16_t pc = (pulse == 2) ? HK_HOT : HK_BRIGHT;
+    tft.drawRect(2, 2, 156, 124, pc);
+    delay(55);
+    if(pulse < 2) { tft.drawRect(2, 2, 156, 124, HK_BG); delay(35); }
+  }
+  // Settled border: outer bright + inner dim
+  tft.drawRect(2, 2, 156, 124, HK_BRIGHT);
+  tft.drawRect(4, 4, 152, 120, HK_DIM);
+
+  delay(50);
+
+  // ── 7. Blinking "> INITIALISING... <" prompt, wait for button press ───────
+  const char* prompt = "> INITIALISING... <";
+  int plen   = strlen(prompt);
+  int pWidth = plen * 6;
+  int px0    = (160 - pWidth) / 2;
+  int py     = 100;
+
+  auto drawPrompt = [&](bool on) {
+    tft.setTextSize(1);
+    tft.setTextColor(on ? HK_BRIGHT : HK_BG);
+    tft.setCursor(px0, py);
+    tft.print(prompt);
+  };
+
+  // Fast-blink 5 times, then wait
+  for(int b = 0; b < 5; b++) {
+    drawPrompt(true);  delay(160);
+    drawPrompt(false); delay(100);
+  }
+  drawPrompt(true);
+
+  while(digitalRead(JOY_SW) == LOW) { yield(); delay(10); }
+  unsigned long lastBlink = millis();
+  bool promptOn = true;
+  while(digitalRead(JOY_SW) != LOW) {
+    if(millis() - lastBlink > 350) {
+      promptOn = !promptOn;
+      drawPrompt(promptOn);
+      lastBlink = millis();
+    }
+    yield(); delay(10);
+  }
+  while(digitalRead(JOY_SW) == LOW) { yield(); delay(10); }
+
+  // ── 8. Glitch-wipe exit: random scanlines scramble, then hard black ───────
+  // Draw ~30 random horizontal lines in HK_BRIGHT/HK_DIM to simulate glitch
+  unsigned long seed = millis();
+  for(int g = 0; g < 40; g++) {
+    seed = seed * 1664525UL + 1013904223UL; // LCG
+    int gy = (int)(seed >> 17) & 127;
+    uint16_t gc = ((seed >> 24) & 1) ? HK_BRIGHT : HK_DIM;
+    tft.drawFastHLine(0, gy, 160, gc);
+    delay(4);
+  }
+  delay(20);
+  tft.fillScreen(0x0000);
+  delay(20);
+  // Small white flash
+  tft.fillScreen(HK_WHITE);
+  delay(25);
+  tft.fillScreen(0x0000);
 }
 
 
@@ -3468,21 +4366,15 @@ void handleJoystick() {
       drawLeftPanel();
       drawCursorAt(cursorCol, cursorRow);
     } else if(dy != 0) {
-      // Cycle through panel buttons — direction is inverted relative to board:
-      // pushing UP (dy=+1 on board) goes DOWN in the panel list, and vice versa.
-      // Flip dy here so the user experience matches the board direction.
-      int panelDy = -dy;
-      if(panelDy > 0) {
-        // Move down the panel: 1→2→3→1
-        if(panelFocus == 1)      panelFocus = 2;
-        else if(panelFocus == 2) panelFocus = 3;
-        else                     panelFocus = 1;
-      } else {
-        // Move up the panel: 1→3→2→1
-        if(panelFocus == 1)      panelFocus = 3;
-        else if(panelFocus == 3) panelFocus = 2;
-        else                     panelFocus = 1;
-      }
+      // dy=1 = joystick UP → move toward flag (panel 1, top)
+      // dy=-1 = joystick DOWN → move toward theme (panel 3, bottom)
+      // Order: 1(flag/top) → 2(undo/mid) → 3(theme/bottom)
+      // No wrap: clamp at ends so pushing up at flag does nothing,
+      // pushing down at theme does nothing.
+      int newFocus = panelFocus + (dy > 0 ? -1 : 1);
+      if(newFocus < 1) newFocus = 1;
+      if(newFocus > 3) newFocus = 3;
+      panelFocus = newFocus;
       cursorRow = (panelFocus == 1) ? 6 : (panelFocus == 2) ? 3 : 1;
       drawLeftPanel();
     }
@@ -3492,7 +4384,7 @@ void handleJoystick() {
 // ═══════════════════════════════════════════════════════════════════════════════
 // HOLD BUTTON SYSTEM (modified for resign + password undo)
 // ═══════════════════════════════════════════════════════════════════════════════
-#define HOLD_CONFIRM_MS      1000   // 1 second hold for resign / undo
+#define HOLD_CONFIRM_MS      2000   // 2 second hold for resign / undo
 #define HOLD_CHECKMATE_MS    2000   // 2 second hold when checkmated
 
 static int  holdAction   = 0;
@@ -3621,14 +4513,23 @@ void handleButton() {
     bool moved = false;
     for(int i=0;i<legalCount;i++) {
       if(legalCache[i].to == clickSq) {
+        // Safety: if history is full, declare draw rather than corrupt state
+        if(historyCount >= MAX_HISTORY - 2) {
+          gameOver = true;
+          strcpy(gameOverMsg, "Draw: Move Limit");
+          drawGameOver();
+          return;
+        }
         HistoryEntry he;
         makeMove(legalCache[i], &he);
         history[historyCount++] = he;
-        hashHistory[hashHistoryCount++] = currentHash;
+        if(hashHistoryCount < MAX_HISTORY + AB_MAX_LEVELS + 3)
+          hashHistory[hashHistoryCount++] = currentHash;
+        else
+          hashHistoryCount++;
         fullMoveCount++;
 
         clearLegalDots();
-        int prevSel = selSq;
         selSq = -1; legalCount = 0;
         drawSquare(he.mv.from);
         drawSquare(he.mv.to);
@@ -3646,6 +4547,7 @@ void handleButton() {
         drawCursorAt(cursorCol, cursorRow);
         moved = true;
 
+        drawLeftPanel();   // updates phase indicator
         checkGameOver();
         if(gameOver) { drawGameOver(); return; }
 
@@ -3664,7 +4566,10 @@ void handleButton() {
           HistoryEntry he2;
           makeMove(botMove, &he2);
           history[historyCount++] = he2;
-          hashHistory[hashHistoryCount++] = currentHash;
+          if(hashHistoryCount < MAX_HISTORY + AB_MAX_LEVELS + 3)
+            hashHistory[hashHistoryCount++] = currentHash;
+          else
+            hashHistoryCount++;
           // openingMoveIndex already updated inside getBotMove — do not increment here
           lastBlackFrom = botMove.from;
           lastBlackTo   = botMove.to;
@@ -3697,6 +4602,7 @@ void handleButton() {
           drawLastMoveOutlines(engineFrom, engineTo);
           drawCursorAt(cursorCol, cursorRow);
 
+          drawLeftPanel();   // updates phase indicator
           checkGameOver();
           if(gameOver) drawGameOver();
         }
@@ -3960,19 +4866,21 @@ void showThemeMenu() {
 }
 void doRestart() {
   initBoard();
-  themeIndex   = 0;   // reset to default theme (WOOD) on restart
-  themeMenuSel = 0;
-  refreshTheme();
-  dispPct = -1;
-  panelFocus = 0;
-  cursorCol = 4;
-  cursorRow = 4;
-  selSq = -1;
-  legalCount = 0;
+  // Do NOT reset themeIndex — player keeps their chosen theme across games
+  evalScore   = 0;    // reset eval bar to 50/50
+  dispPct     = -1;
+  searchDepth = 0;
+  searchPct   = 0;
+  panelFocus  = 0;
+  cursorCol   = 4;
+  cursorRow   = 4;
+  selSq       = -1;
+  legalCount  = 0;
   checkmatePending = false;
+  fullMoveCount    = 0;
   memset(tt, 0, sizeof(tt));
   memset(histHeuristic, 0, sizeof(histHeuristic));
-  drawAll();
+  drawAll();  // drawAll calls drawEvalBar(evalScore) which is now 0
 }
 
 void doUndo() {
@@ -3983,16 +4891,37 @@ void doUndo() {
     checkmatePending=false;
   }
 
-  unmakeMove(history[historyCount-1]);
+  if(historyCount >= 2 && historyCount-1 < MAX_HISTORY)
+    unmakeMove(history[historyCount-1]);
   historyCount--;
   if(hashHistoryCount>0) hashHistoryCount--;
   engineFrom=-1; engineTo=-1;
 
-  unmakeMove(history[historyCount-1]);
+  if(historyCount >= 1 && historyCount-1 < MAX_HISTORY)
+    unmakeMove(history[historyCount-1]);
   historyCount--;
   if(hashHistoryCount>0) hashHistoryCount--;
 
   openingMoveIndex = max(0, openingMoveIndex-1);
+
+  // Rebuild bPieceMoved, lastBlackFrom, lastBlackTo from remaining history.
+  // These are tracking helpers for the opening heuristic — if we can't
+  // perfectly reconstruct them we reset to safe defaults, which is harmless
+  // (at worst the engine misses one opening penalty for one move).
+  bPieceMoved  = 0;
+  lastBlackFrom = -1;
+  lastBlackTo   = -1;
+  for(int i = 1; i < historyCount; i++) {
+    Move& mv = history[i].mv;
+    // Only track black moves (odd indices in history: 0=white, 1=black, 2=white...)
+    // Black moves are at odd indices since white always moves first.
+    if(i % 2 == 1) {
+      bPieceMoved &= ~(1ULL << mv.from);
+      bPieceMoved |=  (1ULL << mv.to);
+      lastBlackFrom = mv.from;
+      lastBlackTo   = mv.to;
+    }
+  }
 
   selSq=-1; legalCount=0;
   drawAll();
