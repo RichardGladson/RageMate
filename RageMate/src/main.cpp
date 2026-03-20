@@ -1,17 +1,13 @@
 /*
- * RageMate Maxima V1
- * Changes from Ultra V3:
- *   - Opening system fully patched: book moves are now advisory only — engine
- *     always escapes to full search if any opponent piece threatens a capture
- *     on the candidate square or attacks any undefended black piece (blindness fix)
- *   - d5 response to 1.Nc3 corrected (was playing e5 erroneously)
- *   - Knight-opening center-pawn rule: after Nf3/Nc3 the correct adjacent
- *     center pawn is pushed (d5 vs Nf3 attacks e5/d4; d5 vs Nc3 attacks d5/e4)
- *   - HACKER theme added (index 37, dark terminal green-on-black, serious palette)
- *   - Epic intro cutscene: RageMate title reveal, model name slot-machine scroll
- *     (Enigma→Maxima), version number slot (1-9→1), all in HACKER colours
- *   - NUM_THEMES updated to 38
- *   - All V3 changes retained (hold timing, flag shift, eval bar dot, pruning)
+ * RageMate Maxima V2
+ * Changes from Maxima V1:
+ *   - Joystick sensitivity button (+) added to left panel (panelFocus 4)
+ *   - Virtual slider UI: 1–100%, default 75%; analog response toggle checkbox
+ *   - Analog response mode: cursor speed scales with joystick deflection distance
+ *   - Cursor redesigned: double-outline (outer bright, inner sqBg gap) on ALL
+ *     squares, not just squares with pieces — always visible on every theme
+ *   - Panel layout tightened to fit new button; phase indicator preserved
+ *   - All Maxima V1 changes retained
  */
 
 #include <Arduino.h>
@@ -768,6 +764,49 @@ int  fullMoveCount = 0;
 unsigned long lastJoyMove = 0;
 #define JOY_DELAY 180
 
+// ─── Joystick sensitivity & analog response ───────────────────────────────────
+// joySensitivity: 1–100. Default 75.
+//   100  = 2× the base delay  (fastest)
+//   75   = base delay (JOY_DELAY = 180 ms)
+//   1    = 4× the base delay  (slowest)
+// Formula: effectiveDelay = JOY_DELAY * (100 - joySensitivity + 25) / 100
+//   at 75:  180 * 100/100 = 180 ms  (neutral)
+//   at 100: 180 *  25/100 =  45 ms  (2× faster — half the delay)
+//   at 1:   180 * 124/100 = ~720 ms (~4× slower)
+// analogResponse: when true, cursor repeat rate also scales with how far
+//   the joystick is pushed from centre (0–2047 from centre on each axis).
+//   The raw axis reading is 0–4095; centre ≈ 2048.
+//   Deflection fraction = (distance from centre) / 2048, clamped 0–1.
+//   Effective delay = baseDelay * (1 - 0.6 * deflection).
+//   At full deflection the delay drops an additional 60% vs the base.
+int  joySensitivity  = 75;    // 1–100, default 75%
+bool analogResponse  = false; // analog speed scaling enabled
+
+// Compute effective joystick delay from current sensitivity + raw axis readings.
+// rawX, rawY: latest analogRead values (only used if analogResponse is on).
+static inline unsigned long joyEffectiveDelay(int rawX, int rawY) {
+  // Base delay from sensitivity (linear mapping)
+  // sens=75 → factor=100/100=1.0 → delay=180
+  // sens=100→ factor=25/100=0.25 → delay=45
+  // sens=1  → factor=124/100=1.24→ delay=223... capped so ×4 max = 720
+  int factor = (100 - joySensitivity) + 25;   // 25 at 100%, 100 at 75%, 124 at 1%
+  unsigned long base = (unsigned long)JOY_DELAY * factor / 100;
+  if(base < 20)  base = 20;   // hard floor — never faster than 20 ms
+  if(base > 720) base = 720;  // hard ceiling — never slower than 720 ms
+
+  if(!analogResponse) return base;
+
+  // Deflection from centre (2048 midpoint on 12-bit ADC)
+  int dx = abs(rawX - 2048);
+  int dy = abs(rawY - 2048);
+  int deflect = max(dx, dy);  // use dominant axis
+  if(deflect > 2048) deflect = 2048;
+  // Scale: at full deflection reduce delay by 60%
+  unsigned long scaled = base - (base * 6UL * deflect) / (10UL * 2048);
+  if(scaled < 20) scaled = 20;
+  return scaled;
+}
+
 // ─── Piece-square tables ─────────────────────────────────────────────────────
 // Written from WHITE's perspective, rank 0 = white's back rank (a1..h1).
 // Black pieces are automatically flipped by pstValue().
@@ -916,6 +955,7 @@ bool isRepetition();
 bool selectSquare(int sq);
 
 void showThemeMenu();
+void showSensitivityMenu();
 
 // ─── UI-2: Password system ───────────────────────────────────────────────────
 void showPasswordKeypad();
@@ -3365,16 +3405,28 @@ void clearLegalDots() {
 }
 
 void drawCursorAt(int col, int row) {
-  if(col >= 0) {
-    int sq = sqOf(row, col);
-    int sx = sqX(sq), sy = sqY(sq);
-    uint16_t c;
-    bool onLastMove = (engineFrom >= 0 && (sq == engineFrom || sq == engineTo));
-    if(selSq == sq)       c = C_BOTH;
-    else if(onLastMove)   c = C_CURSOR_LASTMOVE;
-    else                  c = C_HOVER;
-    tft.drawRect(sx, sy, SQ_W, SQ_H, c);
-  }
+  if(col < 0) return;
+  int sq = sqOf(row, col);
+  int sx = sqX(sq), sy = sqY(sq);
+
+  // Determine outer cursor colour based on context
+  uint16_t outerC;
+  if(selSq == sq)                                        outerC = C_BOTH;
+  else if(engineFrom >= 0 && (sq==engineFrom||sq==engineTo)) outerC = C_CURSOR_LASTMOVE;
+  else                                                   outerC = C_HOVER;
+
+  // Inner gap colour — always the square's background so the gap is invisible
+  // against the square but creates a crisp separation ring that makes the
+  // outer outline pop on any theme, light or dark.
+  uint16_t sqBg = ((rankOf(sq)+fileOf(sq))%2==0) ? C_DARK_SQ : C_LIGHT_SQ;
+
+  // Double-outline: outer rect in accent colour, inner rect in sqBg (gap ring)
+  tft.drawRect(sx,   sy,   SQ_W,   SQ_H,   outerC);
+  tft.drawRect(sx+1, sy+1, SQ_W-2, SQ_H-2, sqBg);
+
+  // Re-apply sel outline on top if this square is selected (sel draws over gap)
+  if(selSq == sq)
+    tft.drawRect(sx+1, sy+1, SQ_W-2, SQ_H-2, C_SEL);
 }
 
 void redrawSquareWithArrow(int sq, int cursorSq=-1) {
@@ -3431,42 +3483,48 @@ void drawLeftPanel() {
   // ── Panel background strip — 13px wide, runs full height ─────────────────
   tft.fillRect(0, 0, 13, 128, C_PANEL_BG);
 
-  // ── Flag (resign) button — y 8..37 (30px) ────────────────────────────────
-  tft.fillRoundRect(2, 8, 10, 30, 2, C_BTN_FACE);
-  drawFlagIcon(2, 8);
-  if(panelFocus==1) {
-    tft.drawRect(1, 7, 11, 32, C_HOVER);
-  }
+  // Panel layout (squeezed to fit 4 buttons + phase indicator):
+  //   Flag       y  6..31  (26px button)
+  //   UND        y 36..61  (26px button)
+  //   Theme      y 66..78  (13px button)
+  //   Sens (+)   y 82..94  (13px button)
+  //   Phase      y 99..108 (indicator)
 
-  // ── UND (undo) button — y 43..72 (30px) ──────────────────────────────────
-  tft.fillRoundRect(2, 43, 10, 30, 2, C_BTN_FACE);
-  if(panelFocus==2) {
-    tft.drawRect(1, 42, 11, 32, C_HOVER);
-  }
+  // ── Flag (resign) button — y 6..31 ───────────────────────────────────────
+  tft.fillRoundRect(2, 6, 10, 26, 2, C_BTN_FACE);
+  drawFlagIcon(2, 6);
+  if(panelFocus==1) tft.drawRect(1, 5, 11, 28, C_HOVER);
+
+  // ── UND (undo) button — y 36..61 ─────────────────────────────────────────
+  tft.fillRoundRect(2, 36, 10, 26, 2, C_BTN_FACE);
+  if(panelFocus==2) tft.drawRect(1, 35, 11, 28, C_HOVER);
   tft.setTextSize(1);
-  tft.setTextColor(C_BTN_HL);      tft.setCursor(4, 47); tft.print('U');
-  tft.setTextColor(C_BORDER);      tft.setCursor(4, 55); tft.print('N');
-  tft.setTextColor(C_SIDE_ACCENT); tft.setCursor(4, 63); tft.print('D');
+  tft.setTextColor(C_BTN_HL);      tft.setCursor(4, 39); tft.print('U');
+  tft.setTextColor(C_BORDER);      tft.setCursor(4, 47); tft.print('N');
+  tft.setTextColor(C_SIDE_ACCENT); tft.setCursor(4, 55); tft.print('D');
 
-  // ── Palette (theme) button — y 77..93 (17px) ─────────────────────────────
-  int py = 77;
-  tft.fillRoundRect(2, py, 10, 17, 2, C_BTN_FACE);
-  if(panelFocus==3) {
-    tft.drawRect(1, py-1, 11, 19, C_HOVER);
-  }
-  // 2-colour swatch: darkSq | lightSq in 8px total, centred in 10px button
-  tft.fillRect(3, py+4, 4, 9, C_DARK_SQ);
-  tft.fillRect(7, py+4, 4, 9, C_LIGHT_SQ);
+  // ── Palette (theme) button — y 66..78 ────────────────────────────────────
+  tft.fillRoundRect(2, 66, 10, 13, 2, C_BTN_FACE);
+  if(panelFocus==3) tft.drawRect(1, 65, 11, 15, C_HOVER);
+  tft.fillRect(3, 69, 4, 7, C_DARK_SQ);
+  tft.fillRect(7, 69, 4, 7, C_LIGHT_SQ);
 
-  // ── Phase indicator — y 98..107, centred letter ───────────────────────────
+  // ── Sensitivity (+) button — y 82..94 ────────────────────────────────────
+  tft.fillRoundRect(2, 82, 10, 13, 2, C_BTN_FACE);
+  if(panelFocus==4) tft.drawRect(1, 81, 11, 15, C_HOVER);
+  tft.setTextSize(1);
+  tft.setTextColor(C_BTN_HL);
+  tft.setCursor(4, 85); tft.print('+');
+
+  // ── Phase indicator — y 99..108 ──────────────────────────────────────────
   {
     int ph = gamePhase();
     char letter = (ph==0) ? 'O' : (ph==1) ? 'M' : 'E';
     uint16_t col = (ph==0) ? C_SIDE_ACCENT : (ph==1) ? C_BTN_HL : C_GAMEOVER;
-    tft.fillRect(0, 97, 13, 10, C_PANEL_BG);
+    tft.fillRect(0, 98, 13, 10, C_PANEL_BG);
     tft.setTextSize(1);
     tft.setTextColor(col);
-    tft.setCursor(4, 98);
+    tft.setCursor(4, 99);
     tft.print(letter);
   }
 }
@@ -4325,10 +4383,11 @@ void playIntroCutscene() {
 // JOYSTICK HANDLING
 // ═══════════════════════════════════════════════════════════════════════════════
 void handleJoystick() {
-  if(millis()-lastJoyMove < JOY_DELAY) return;
-
   int vx = analogRead(JOY_VRX);
   int vy = analogRead(JOY_VRY);
+
+  unsigned long effDelay = joyEffectiveDelay(vx, vy);
+  if(millis() - lastJoyMove < effDelay) return;
 
   int dx=0, dy=0;
   if(vx < 1000) dx=-1;
@@ -4350,8 +4409,9 @@ void handleJoystick() {
     if(newCol < 0) {
       cursorCol = -1;
       cursorRow = newRow;
-      // Map board row to panel focus: rows 5-7→flag(1), rows 2-4→undo(2), rows 0-1→theme(3)
-      panelFocus = (newRow >= 5) ? 1 : (newRow >= 2) ? 2 : 3;
+      // Map board row to panel focus:
+      // rows 6-7→flag(1), rows 4-5→undo(2), rows 2-3→theme(3), rows 0-1→sensitivity(4)
+      panelFocus = (newRow >= 6) ? 1 : (newRow >= 4) ? 2 : (newRow >= 2) ? 3 : 4;
       drawLeftPanel();
     } else {
       cursorCol = constrain(newCol, 0, 7);
@@ -4367,15 +4427,13 @@ void handleJoystick() {
       drawCursorAt(cursorCol, cursorRow);
     } else if(dy != 0) {
       // dy=1 = joystick UP → move toward flag (panel 1, top)
-      // dy=-1 = joystick DOWN → move toward theme (panel 3, bottom)
-      // Order: 1(flag/top) → 2(undo/mid) → 3(theme/bottom)
-      // No wrap: clamp at ends so pushing up at flag does nothing,
-      // pushing down at theme does nothing.
+      // dy=-1 = joystick DOWN → move toward sensitivity (panel 4, bottom)
+      // Order: 1(flag) → 2(undo) → 3(theme) → 4(sensitivity)
       int newFocus = panelFocus + (dy > 0 ? -1 : 1);
       if(newFocus < 1) newFocus = 1;
-      if(newFocus > 3) newFocus = 3;
+      if(newFocus > 4) newFocus = 4;
       panelFocus = newFocus;
-      cursorRow = (panelFocus == 1) ? 6 : (panelFocus == 2) ? 3 : 1;
+      cursorRow = (panelFocus == 1) ? 7 : (panelFocus == 2) ? 5 : (panelFocus == 3) ? 2 : 0;
       drawLeftPanel();
     }
   }
@@ -4469,6 +4527,13 @@ void handleButton() {
       if(millis()-lastPress < 300) return;
       lastPress = millis();
       showThemeMenu();
+      return;
+    }
+    // panelFocus 4 = sensitivity — single press, no hold
+    if(panelFocus == 4) {
+      if(millis()-lastPress < 300) return;
+      lastPress = millis();
+      showSensitivityMenu();
       return;
     }
     int wantAction = (panelFocus == 1) ? 1 : (panelFocus == 2 ? 2 : 0);
@@ -4642,7 +4707,175 @@ bool selectSquare(int sq) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// UI-5: THEME SELECTION MENU
+// UI-6: SENSITIVITY MENU
+// ═══════════════════════════════════════════════════════════════════════════════
+// Layout:
+//   Header (top 16px): "SENSITIVITY"
+//   Slider bar (y 24): filled rect showing current %, label "XX%"
+//   Analog response checkbox (y 52): outlined box + label
+//   Back button prompt (y 108)
+//
+// Controls (FIXED joystick speed — always uses neutral 180ms delay):
+//   LEFT/RIGHT: adjust sensitivity 1–100
+//   UP/DOWN: move focus between slider and analog-response checkbox
+//   BTN: toggle analogResponse when checkbox is focused / confirm slider value
+//   HOLD LEFT: exit back to board
+//
+// The joystick in THIS menu always uses JOY_DELAY (180ms) regardless of the
+// current sensitivity setting, so the menu remains controllable at any value.
+// ═══════════════════════════════════════════════════════════════════════════════
+void showSensitivityMenu() {
+  // ── Full redraw ───────────────────────────────────────────────────────────
+  tft.fillScreen(C_BG);
+  tft.fillRect(0, 0, 160, 16, C_BTN_BG);
+  tft.setTextSize(1);
+  tft.setTextColor(C_HOVER);  tft.setCursor(4, 4);  tft.print("SENSITIVITY");
+  tft.setTextColor(C_BORDER); tft.setCursor(90,4);  tft.print("BTN=select");
+  tft.drawFastHLine(0, 16, 160, C_BORDER);
+
+  // Footer
+  tft.drawFastHLine(0, 118, 160, C_BORDER);
+  tft.setTextColor(C_BORDER); tft.setCursor(4, 120); tft.print("hold left to go back");
+
+  // Working copy — don't commit until exit
+  int   workSens    = joySensitivity;
+  bool  workAnalog  = analogResponse;
+  // focusItem: 0 = slider, 1 = analog checkbox
+  int   focusItem   = 0;
+
+  // ── Slider draw helper ────────────────────────────────────────────────────
+  // Slider: x 4..155 (152px wide), y 30..39 (10px tall)
+  const int SL_X = 4, SL_Y = 30, SL_W = 152, SL_H = 10;
+
+  auto drawSlider = [&]() {
+    // Background track
+    tft.fillRect(SL_X, SL_Y, SL_W, SL_H, C_BTN_BG);
+    tft.drawRect(SL_X, SL_Y, SL_W, SL_H, (focusItem==0) ? C_HOVER : C_BORDER);
+    // Filled portion — map 1–100 to 0–SL_W pixels
+    int filled = (workSens - 1) * (SL_W - 2) / 99;
+    if(filled > 0)
+      tft.fillRect(SL_X+1, SL_Y+1, filled, SL_H-2, C_HOVER);
+    // Slider label above bar
+    tft.fillRect(SL_X, SL_Y - 12, SL_W, 10, C_BG);
+    tft.setTextSize(1);
+    tft.setTextColor((focusItem==0) ? C_HOVER : C_BTN_HL);
+    tft.setCursor(SL_X, SL_Y - 10);
+    tft.print("Cursor Speed");
+    // Percentage value to the right
+    tft.fillRect(130, SL_Y - 10, 30, 8, C_BG);
+    tft.setTextColor(C_HOVER);
+    tft.setCursor(132, SL_Y - 10);
+    if(workSens < 10)  tft.print(' ');
+    if(workSens < 100) tft.print(' ');
+    tft.print(workSens); tft.print('%');
+  };
+
+  // ── Analog response checkbox draw helper ──────────────────────────────────
+  // Checkbox: 8×8 box at (4, 56), label to the right
+  const int CB_X = 4, CB_Y = 56, CB_S = 8;
+
+  auto drawCheckbox = [&]() {
+    tft.fillRect(0, CB_Y - 12, 160, 30, C_BG);
+    tft.setTextSize(1);
+    tft.setTextColor((focusItem==1) ? C_HOVER : C_BTN_HL);
+    tft.setCursor(CB_X, CB_Y - 10);
+    tft.print("Analog Response");
+    // Outer border — bright when focused
+    tft.drawRect(CB_X, CB_Y, CB_S, CB_S, (focusItem==1) ? C_HOVER : C_BORDER);
+    // Fill when checked
+    if(workAnalog)
+      tft.fillRect(CB_X+2, CB_Y+2, CB_S-4, CB_S-4, C_HOVER);
+    else
+      tft.fillRect(CB_X+2, CB_Y+2, CB_S-4, CB_S-4, C_BG);
+    // Description line
+    tft.setTextColor(C_BORDER);
+    tft.setCursor(CB_X + CB_S + 4, CB_Y);
+    tft.print(workAnalog ? "ON " : "OFF");
+    tft.setCursor(CB_X, CB_Y + CB_S + 3);
+    tft.print("Speed scales with push");
+  };
+
+  drawSlider();
+  drawCheckbox();
+
+  // ── Input loop — FIXED delay (JOY_DELAY, always 180ms) ───────────────────
+  unsigned long lastJoy2  = 0;
+  unsigned long holdLeft  = 0;
+  bool          joyWas    = false;
+
+  while(true) {
+    yield();
+
+    // Hold-left progress bar to exit
+    int vxR = analogRead(JOY_VRX);
+    int vyR = analogRead(JOY_VRY);
+    bool joyLeft = (vxR < 1000);
+    if(joyLeft) {
+      if(holdLeft == 0) holdLeft = millis();
+      unsigned long held = millis() - holdLeft;
+      int pct = (int)((held * 100UL) / 1200UL);
+      if(pct > 100) pct = 100;
+      // Draw tiny back-progress bar at bottom
+      tft.fillRect(TM_PB_X, TM_PB_Y, TM_PB_W, TM_PB_H, C_BTN_BG);
+      if(pct > 0) tft.fillRect(TM_PB_X, TM_PB_Y, (TM_PB_W * pct) / 100, TM_PB_H, C_HOVER);
+      if(held >= 1200) {
+        // Commit values and return
+        joySensitivity = workSens;
+        analogResponse = workAnalog;
+        drawAll();
+        return;
+      }
+    } else {
+      if(holdLeft != 0) {
+        holdLeft = 0;
+        tft.fillRect(TM_PB_X, TM_PB_Y, TM_PB_W, TM_PB_H, C_BG);
+      }
+    }
+
+    // Joystick movement — always use fixed JOY_DELAY
+    if(millis() - lastJoy2 < (unsigned long)JOY_DELAY) continue;
+
+    int dxJ = 0, dyJ = 0;
+    if(vxR < 1000) dxJ = -1;
+    else if(vxR > 3000) dxJ = 1;
+    if(vyR < 1000) dyJ = 1;
+    else if(vyR > 3000) dyJ = -1;
+
+    if(dxJ != 0 || dyJ != 0) {
+      lastJoy2 = millis();
+
+      if(dyJ != 0) {
+        // UP/DOWN: switch focus between slider (0) and checkbox (1)
+        int newFocus = focusItem + (dyJ > 0 ? -1 : 1);
+        if(newFocus < 0) newFocus = 0;
+        if(newFocus > 1) newFocus = 1;
+        if(newFocus != focusItem) {
+          focusItem = newFocus;
+          drawSlider();
+          drawCheckbox();
+        }
+      }
+
+      if(dxJ != 0 && focusItem == 0) {
+        workSens += dxJ;
+        if(workSens < 1)   workSens = 1;
+        if(workSens > 100) workSens = 100;
+        drawSlider();
+      }
+    }
+
+    // Button press: toggle checkbox or confirm slider
+    bool pressed = (digitalRead(JOY_SW) == LOW);
+    if(pressed && !joyWas) {
+      if(focusItem == 1) {
+        workAnalog = !workAnalog;
+        drawCheckbox();
+      }
+      // On slider: button does nothing extra (slider value is always live)
+    }
+    joyWas = pressed;
+  }
+}
 // ═══════════════════════════════════════════════════════════════════════════════
 // Layout: header (top 18px) + scrollable list (10 rows × 11px) + footer (bottom 9px)
 // Each row: index (2 chars) + name (up to 12 chars) + 3-colour swatch (14px wide)
